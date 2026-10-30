@@ -34,7 +34,6 @@ services:
       - "traefik.http.routers.employa.entrypoints=websecure"
       - "traefik.http.routers.employa.tls=true"
       - "traefik.http.routers.employa.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.employa.middlewares=employa-auth@file"
       - "traefik.http.routers.employa.service=employa-web"
       - "traefik.http.services.employa-web.loadbalancer.server.port=80"
 
