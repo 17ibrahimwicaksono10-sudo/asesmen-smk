@@ -1,0 +1,24 @@
+name: asesmen-smk
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    env_file:
+      - ./backend/.env
+    environment:
+      PORT: "5000"
+    volumes:
+      - ./backend/data:/app/backend/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.frontend
+    ports:
+      # PRIVAT untuk tes via SSH tunnel; jangan dibuka publik sebelum keamanan login diperbaiki
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

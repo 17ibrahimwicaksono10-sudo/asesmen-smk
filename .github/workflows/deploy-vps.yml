@@ -1,0 +1,70 @@
+name: Deploy Asesmen to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asesmen-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies and validate build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up deploy SSH key and verified host key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Backup persistent database on VPS
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ubuntu@43.173.6.6 \
+            'set -e; mkdir -p /home/ubuntu/asesmen-backups; if test -f /home/ubuntu/Prototype/backend/data/database.json; then cp /home/ubuntu/Prototype/backend/data/database.json "/home/ubuntu/asesmen-backups/database-$(date +%Y%m%d-%H%M%S).json"; fi; find /home/ubuntu/asesmen-backups -maxdepth 1 -type f -name "database-*.json" -mtime +14 -delete'
+
+      - name: Sync code (NEVER sync secrets or assessment data)
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude='/.git/' \
+            --exclude='/backend/data/***' \
+            --exclude='/backend/.env' \
+            --exclude='/frontend/.env' \
+            --exclude='/.env' \
+            --exclude='**/node_modules/***' \
+            --exclude='**/dist/***' \
+            -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' \
+            ./ ubuntu@43.173.6.6:/home/ubuntu/Prototype/
+
+      - name: Rebuild and health-check VPS
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ubuntu@43.173.6.6 \
+            'set -e; cd /home/ubuntu/Prototype; sudo -n docker compose config --quiet; sudo -n docker compose up -d --build; sudo -n docker compose ps; curl -fsS --retry 6 --retry-delay 3 --retry-connrefused http://127.0.0.1:8080/api/health'
