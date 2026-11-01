@@ -297,6 +297,7 @@ export interface StudentAnswer {
   aiRubricScoring?: AIRubricScoreResult;
   score?: number;
   maxScore?: number;
+  isPendingEvaluation?: boolean; // Komponen belum dinilai / pending penilaian guru
   teacherFeedback?: string;
 }
 
@@ -366,6 +367,8 @@ export interface ExamSubmission {
   essayScore?: number;
   originalAIScoreTotal?: number; // Preserves raw AI score for audit comparison
   teacherScoreTotal?: number;    // Final score confirmed by human teacher
+  hasPendingComponents?: boolean; // True jika masih ada komponen wajib yang belum dinilai
+  isScoreFinal?: boolean;         // True jika seluruh komponen telah dinilai dan disahkan
   status: 'perlu_pemeriksaan' | 'dinilai';
   validationStatus?: 'pending_review' | 'approved' | 'revised' | 'returned';
   validatedBy?: string;          // Teacher name/NIP validator identity

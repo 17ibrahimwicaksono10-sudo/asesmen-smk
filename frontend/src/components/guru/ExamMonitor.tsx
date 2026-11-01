@@ -413,16 +413,26 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
                     <div className="text-right">
                       {(() => {
+                        const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
+                        const hasPending = sub.hasPendingComponents || (!isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.requiresTeacherReview));
                         const subRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
                         const subMaxRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (sub.maxRawScore || 65);
                         return (
                           <>
                             <div className="flex items-baseline justify-end gap-0.5">
-                              <span className="text-base font-black text-emerald-400">{sub.totalScore}</span>
-                              <span className="text-[10px] text-slate-400">/ 100</span>
+                              {hasPending ? (
+                                <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
+                                  Menunggu Review Guru
+                                </span>
+                              ) : (
+                                <>
+                                  <span className="text-base font-black text-emerald-400">{sub.totalScore}</span>
+                                  <span className="text-[10px] text-slate-400">/ 100</span>
+                                </>
+                              )}
                             </div>
                             <div className="text-[10px] text-slate-400 font-medium">
-                              Skor Mentah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong>
+                              Skor Sah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong>
                             </div>
                           </>
                         );

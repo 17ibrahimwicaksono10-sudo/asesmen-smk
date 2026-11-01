@@ -267,6 +267,7 @@ export interface StudentAnswer {
   aiRubricScoring?: AIRubricScoreResult;
   score?: number;
   maxScore?: number;
+  isPendingEvaluation?: boolean; // Komponen belum dinilai / pending penilaian guru
   teacherFeedback?: string;
 }
 
@@ -328,12 +329,16 @@ export interface ExamSubmission {
   allowRetake?: boolean;
   answers: Record<string, StudentAnswer>;
   totalScore: number;
+  rawScoreTotal?: number;
+  maxRawScore?: number;
   technicalScore: number;
   employabilityScore: number;
   autoScore?: number;          // Skor otomatis: pilgan + kompleks + menjodohkan
   essayScore?: number;         // Skor esai dari penilaian AI
   originalAIScoreTotal?: number; // Raw AI Score (preserves AI history)
   teacherScoreTotal?: number;    // Final score set by teacher
+  hasPendingComponents?: boolean; // True jika masih ada komponen wajib yang belum dinilai
+  isScoreFinal?: boolean;         // True jika seluruh komponen telah dinilai dan disahkan
   status: 'perlu_pemeriksaan' | 'dinilai';
   validationStatus?: 'pending_review' | 'approved' | 'revised' | 'returned';
   validatedBy?: string;          // Teacher validator identity

@@ -458,6 +458,153 @@ async function runResilienceTests() {
     assert.strictEqual(finalSub.totalScore, 92, 'Total skor (92) tidak boleh tertimpa');
   });
 
+  // --------------------------------------------------------------------
+  // UJI 10: Penanganan Komponen Sebagian Pending (Zero Artificial Scores)
+  // --------------------------------------------------------------------
+  console.log('\n--- UJI 10: Komponen Sebagian Pending (Bebas Nilai Positif Buatan) ---');
+  const mixedSubId = `sub-res-mixed-${ts}`;
+  await test('Komponen objektif dinilai sah, komponen esai/multimodal pending, nilai belum final', async () => {
+    const mixedPayload = {
+      id: mixedSubId,
+      examId: `ex-mixed-scenario-${ts}`,
+      examTitle: 'Ujian Ketahanan AI Kimia',
+      packageId: 'pkg-keselamatan-k3-10',
+      studentName: 'Budi Siswa Parsial',
+      studentNis: `NIS-PARS-${ts}`,
+      className: 'XII Kimia Analitik 1',
+      submitTime: new Date().toISOString(),
+      answers: {
+        // Pilihan ganda: Jawaban benar bernilai sah
+        'q-k3-01': {
+          questionId: 'q-k3-01',
+          selectedOption: 'APD Lengkap'
+        },
+        // Esai: Belum dinilai oleh guru dan AI belum aktif
+        'q-k3-09': {
+          questionId: 'q-k3-09',
+          essayAnswer: 'Tumpahan asam sulfat dinetralkan dengan natrium karbonat secara perlahan.'
+        }
+      }
+    };
+
+    const submitRes = await request('/api/submissions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${studentToken}` },
+      body: mixedPayload
+    });
+
+    assert.strictEqual(submitRes.status, 200);
+    const sub = submitRes.body.submission;
+
+    // 1. Verifikasi komponen esai belum dinilai (pending / undefined) - BUKAN nilai buatan 75%!
+    assert.strictEqual(sub.answers['q-k3-09'].score, undefined, 'Skor esai yang belum dinilai tidak boleh diberi nilai buatan');
+    assert.strictEqual(sub.answers['q-k3-09'].isPendingEvaluation, true, 'Komponen esai harus berstatus pending evaluation');
+
+    // 2. Verifikasi status submission belum final
+    assert.strictEqual(sub.status, 'perlu_pemeriksaan', 'Status wajib perlu_pemeriksaan');
+    assert.strictEqual(sub.hasPendingComponents, true, 'Submission wajib menandai hasPendingComponents = true');
+    assert.strictEqual(sub.isScoreFinal, false, 'isScoreFinal wajib false saat masih ada komponen pending');
+    assert.strictEqual(sub.requiresTeacherReview, true, 'Wajib memerlukan review guru');
+  });
+
+  // --------------------------------------------------------------------
+  // UJI 11: Penilaian Manual oleh Guru Menggunakan Rubrik (Finalisasi Skor)
+  // --------------------------------------------------------------------
+  console.log('\n--- UJI 11: Penilaian Manual oleh Guru Menggunakan Rubrik ---');
+  await test('Guru melakukan penilaian manual pada komponen pending -> status menjadi dinilai & final', async () => {
+    const teacherGradingPayload = {
+      id: mixedSubId,
+      validationStatus: 'approved',
+      validatedBy: 'Drs. H. Mulyadi, M.Pd. (Guru Penguji)',
+      validatedAt: new Date().toISOString(),
+      teacherScoreTotal: 85,
+      totalScore: 85,
+      teacherFollowUp: 'Penilaian manual selesai sesuai rubrik 3 kriteria.',
+      answers: {
+        'q-k3-01': {
+          questionId: 'q-k3-01',
+          selectedOption: 'APD Lengkap',
+          score: 1,
+          maxScore: 1
+        },
+        'q-k3-09': {
+          questionId: 'q-k3-09',
+          essayAnswer: 'Tumpahan asam sulfat dinetralkan dengan natrium karbonat secara perlahan.',
+          score: 4,
+          maxScore: 5,
+          isPendingEvaluation: false,
+          teacherFeedback: 'Prosedur penetralan sangat tepat dan runut.'
+        }
+      }
+    };
+
+    const updateRes = await request(`/api/submissions/${mixedSubId}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+      body: teacherGradingPayload
+    });
+
+    assert.strictEqual(updateRes.status, 200);
+    const gradedSub = updateRes.body.submission;
+    assert.strictEqual(gradedSub.validationStatus, 'approved');
+    assert.strictEqual(gradedSub.answers['q-k3-09'].score, 4, 'Skor esai manual guru tersimpan sah (4)');
+    assert.strictEqual(gradedSub.answers['q-k3-09'].isPendingEvaluation, false, 'Komponen esai tidak lagi pending');
+    assert.strictEqual(gradedSub.status, 'dinilai', 'Status berubah menjadi dinilai setelah disahkan guru');
+  });
+
+  // --------------------------------------------------------------------
+  // UJI 12: Verifikasi Prosedur Safe Rollback & Perlindungan Lampiran
+  // --------------------------------------------------------------------
+  console.log('\n--- UJI 12: Verifikasi Prosedur Safe Rollback Tanpa Kehilangan Data ---');
+  await test('Safe rollback mempertahankan submission baru pasca-backup dan melindungi evidence_storage', async () => {
+    // Impor safeRollbackDatabase langsung dari dist bundle untuk eksekusi ESM murni
+    const { safeRollbackDatabase } = await import('../dist/safe_rollback_database.js');
+    const scratchTestDir = path.resolve(process.cwd(), 'scratch_test_safe_rollback');
+    if (!fs.existsSync(scratchTestDir)) fs.mkdirSync(scratchTestDir, { recursive: true });
+
+    const dummyBackupDb = path.join(scratchTestDir, 'database-backup-sample.json');
+    const dummyActiveDb = path.join(scratchTestDir, 'database-active-sample.json');
+
+    // 1. Database backup awal (1 submission)
+    const backupData = {
+      submissions: [{ id: 'sub-legacy-001', studentName: 'Siswa Legacy' }],
+      users: [{ id: 'usr-1', email: 'legacy@smk.id' }],
+      packages: [], exams: [], classes: [], teachers: []
+    };
+    fs.writeFileSync(dummyBackupDb, JSON.stringify(backupData, null, 2), 'utf-8');
+
+    // Buat checksum SHA-256
+    const crypto = await import('crypto');
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(dummyBackupDb)).digest('hex');
+    fs.writeFileSync(`${dummyBackupDb}.sha256`, `${hash}  database-backup-sample.json\n`, 'utf-8');
+
+    // 2. Database aktif setelah deployment (ada submission baru pasca-deploy)
+    const activeData = {
+      submissions: [
+        { id: 'sub-legacy-001', studentName: 'Siswa Legacy' },
+        { id: 'sub-new-post-deploy-002', studentName: 'Siswa Pasca Deploy Baru' }
+      ],
+      users: [{ id: 'usr-1', email: 'legacy@smk.id' }],
+      packages: [], exams: [], classes: [], teachers: []
+    };
+    fs.writeFileSync(dummyActiveDb, JSON.stringify(activeData, null, 2), 'utf-8');
+
+    // 3. Jalankan safe rollback ke file database aktif
+    const rollbackResult = safeRollbackDatabase(dummyBackupDb, dummyActiveDb);
+    assert.strictEqual(rollbackResult.success, true);
+    assert.strictEqual(rollbackResult.checksumMatched, true);
+    assert.strictEqual(rollbackResult.newSubmissionsPreserved, 1, 'Wajib mempertahankan 1 submission baru');
+
+    // 4. Baca kembali database aktif: submission baru TIDAK BOLEH HILANG!
+    const restoredActive = JSON.parse(fs.readFileSync(dummyActiveDb, 'utf-8'));
+    assert.strictEqual(restoredActive.submissions.length, 2, 'Total submission wajib 2 (1 legacy + 1 delta baru)');
+    const hasNewSub = restoredActive.submissions.some(s => s.id === 'sub-new-post-deploy-002');
+    assert.strictEqual(hasNewSub, true, 'Submission baru pasca-deploy tetap tersimpan aman!');
+
+    // Bersihkan scratch
+    fs.rmSync(scratchTestDir, { recursive: true, force: true });
+  });
+
   console.log('\n======================================================================');
   console.log(` HASIL PENGUJIAN KETAHANAN AI: ${passed} LULUS, ${failed} GAGAL`);
   console.log('======================================================================\n');

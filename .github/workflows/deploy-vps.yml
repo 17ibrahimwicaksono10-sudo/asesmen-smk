@@ -55,20 +55,30 @@ jobs:
             mkdir -p /home/ubuntu/asesmen-backups
             mkdir -p /home/ubuntu/asesmen-code-backups
 
-            # 1. Backup persistent database with SHA-256 checksum
+            # 1. Backup persistent database with strict SHA-256 integrity verification (MANDATORY)
             if [ -f /home/ubuntu/Prototype/backend/data/database.json ]; then
               DB_BACKUP="/home/ubuntu/asesmen-backups/database-${TIMESTAMP}.json"
               cp /home/ubuntu/Prototype/backend/data/database.json "${DB_BACKUP}"
               sha256sum "${DB_BACKUP}" > "${DB_BACKUP}.sha256"
-              echo "Database backup created: ${DB_BACKUP}"
+              # Verifikasi integritas: file wajib ada, ukuran > 0, dan checksum cocok
+              if [ ! -s "${DB_BACKUP}" ] || ! sha256sum -c "${DB_BACKUP}.sha256"; then
+                echo "CRITICAL ERROR: Backup database gagal diverifikasi atau korup! Menghentikan deployment." >&2
+                exit 1
+              fi
+              echo "Database backup created and verified: ${DB_BACKUP}"
             fi
 
-            # 2. Backup persistent multimodal evidence storage (gambar, audio, dokumen) with SHA-256
+            # 2. Backup persistent multimodal evidence storage with strict integrity verification (MANDATORY if exists)
             if [ -d /home/ubuntu/Prototype/backend/data/evidence_storage ]; then
               EVIDENCE_BACKUP="/home/ubuntu/asesmen-backups/evidence_storage-${TIMESTAMP}.tar.gz"
               tar -czf "${EVIDENCE_BACKUP}" -C /home/ubuntu/Prototype/backend/data evidence_storage
               sha256sum "${EVIDENCE_BACKUP}" > "${EVIDENCE_BACKUP}.sha256"
-              echo "Multimodal evidence storage backup created: ${EVIDENCE_BACKUP}"
+              # Verifikasi integritas: arsip gzip valid dan checksum cocok
+              if [ ! -s "${EVIDENCE_BACKUP}" ] || ! tar -tzf "${EVIDENCE_BACKUP}" > /dev/null 2>&1 || ! sha256sum -c "${EVIDENCE_BACKUP}.sha256"; then
+                echo "CRITICAL ERROR: Backup evidence storage gagal diverifikasi atau korup! Menghentikan deployment." >&2
+                exit 1
+              fi
+              echo "Multimodal evidence storage backup created and verified: ${EVIDENCE_BACKUP}"
             fi
 
             # 3. Backup secret token key and backend env configuration securely (chmod 600, zero credential logging)
@@ -77,14 +87,22 @@ jobs:
               cp /home/ubuntu/Prototype/backend/data/.auth_secret "${AUTH_SECRET_BACKUP}"
               chmod 600 "${AUTH_SECRET_BACKUP}"
               sha256sum "${AUTH_SECRET_BACKUP}" > "${AUTH_SECRET_BACKUP}.sha256"
-              echo "Auth secret backup created securely."
+              if [ ! -s "${AUTH_SECRET_BACKUP}" ] || ! sha256sum -c "${AUTH_SECRET_BACKUP}.sha256"; then
+                echo "CRITICAL ERROR: Backup auth secret gagal! Menghentikan deployment." >&2
+                exit 1
+              fi
+              echo "Auth secret backup created and verified securely."
             fi
             if [ -f /home/ubuntu/Prototype/backend/.env ]; then
               ENV_BACKUP="/home/ubuntu/asesmen-backups/backend-env-${TIMESTAMP}"
               cp /home/ubuntu/Prototype/backend/.env "${ENV_BACKUP}"
               chmod 600 "${ENV_BACKUP}"
               sha256sum "${ENV_BACKUP}" > "${ENV_BACKUP}.sha256"
-              echo "Backend environment configuration backup created securely."
+              if [ ! -s "${ENV_BACKUP}" ] || ! sha256sum -c "${ENV_BACKUP}.sha256"; then
+                echo "CRITICAL ERROR: Backup backend env configuration gagal! Menghentikan deployment." >&2
+                exit 1
+              fi
+              echo "Backend environment configuration backup created and verified securely."
             fi
 
             # 4. Snapshot current active code with timestamp and commit SHA
@@ -100,10 +118,9 @@ jobs:
                 --exclude="**/dist/***" \
                 /home/ubuntu/Prototype/ "${SNAPSHOT_DIR}/"
               
-              # Maintain pointer to previous release
-              rm -rf /home/ubuntu/asesmen-code-backups/previous_release
-              cp -al "${SNAPSHOT_DIR}" /home/ubuntu/asesmen-code-backups/previous_release
-              echo "Immutable code snapshot saved to ${SNAPSHOT_DIR} and previous_release"
+              # Catat rilis snapshot aktual ke pointer file yang persisten
+              echo "${SNAPSHOT_DIR}" > /home/ubuntu/asesmen-code-backups/LATEST_RELEASE_SNAPSHOT
+              echo "Immutable code snapshot saved to ${SNAPSHOT_DIR}"
             fi
 
             # Clean all backups older than 14 days and code snapshots older than 30 days

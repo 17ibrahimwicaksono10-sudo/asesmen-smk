@@ -324,19 +324,26 @@ class AIEvaluationQueueManager {
           lastErrorMessage = evalResult.scoring_reason || 'Layanan AI offline atau API Key belum terkonfigurasi';
         }
 
-        // Aturan #8: Jangan memberi nilai 0 final jika layanan API belum terpasang atau gagal!
-        let finalQScore = qAns.score !== undefined ? qAns.score : Math.round(qMax * 0.75);
-        if (!isFailedOrOffline && evalResult.total_score !== undefined) {
+        // Penanganan Nilai Sesuai Ketentuan Keamanan Asesmen:
+        // 1. JANGAN menghasilkan nilai perkiraan atau nilai positif buatan, dan jangan vonis nol final.
+        // 2. Pertahankan nilai jika sudah dinilai secara sah oleh guru atau siklus sebelumnya.
+        // 3. Jika belum dinilai dan AI gagal/offline, tandai komponen sebagai pending/ungraded (score = undefined).
+        let finalQScore: number | undefined = undefined;
+        if (typeof qAns.score === 'number') {
+          finalQScore = qAns.score; // Pertahankan skor sah yang sudah ada
+        } else if (!isFailedOrOffline && typeof evalResult.total_score === 'number') {
           finalQScore = Math.min(qMax, Math.max(0, evalResult.total_score));
         }
+
         qAns.score = finalQScore;
         qAns.maxScore = qMax;
+        qAns.isPendingEvaluation = finalQScore === undefined;
         qAns.teacherFeedback = evalResult.feedback || qAns.teacherFeedback;
         qAns.aiRubricScoring = {
           evaluatedAt: evalResult.evaluated_at,
           modelUsed: evalResult.model_used,
           promptVersion: evalResult.prompt_version,
-          totalScoreGiven: finalQScore,
+          totalScoreGiven: finalQScore !== undefined ? finalQScore : 0,
           maxTotalScore: evalResult.maximum_score || qMax,
           scoresPerIndicator: (evalResult.rubric_scores || []).map(r => ({
             indicatorName: r.indicator,
@@ -345,23 +352,24 @@ class AIEvaluationQueueManager {
             rationale: r.feedback || ''
           })),
           evidenceHighlights: [],
-          confidenceStatus: evalResult.requires_teacher_review ? 'Ragu / Perlu Review Guru' : 'Sangat Yakin',
-          confidenceLevel: evalResult.requires_teacher_review ? 'low' : 'high',
+          confidenceStatus: isFailedOrOffline ? 'Ragu / Perlu Review Guru' : (evalResult.requires_teacher_review ? 'Ragu / Perlu Review Guru' : 'Sangat Yakin'),
+          confidenceLevel: isFailedOrOffline ? 'low' : (evalResult.requires_teacher_review ? 'low' : 'high'),
           uncertaintyReason: evalResult.scoring_reason,
-          requiresTeacherReview: evalResult.requires_teacher_review,
+          requiresTeacherReview: true,
           constructiveFeedback: evalResult.feedback,
           keyMasteredConcepts: [],
           areasForImprovement: []
         };
 
         essayEvaluations[q.id] = {
-          score: finalQScore,
+          score: finalQScore !== undefined ? finalQScore : null,
           maxScore: qMax,
           feedback: evalResult.feedback,
           reason: evalResult.scoring_reason,
           modelUsed: evalResult.model_used,
-          requiresTeacherReview: evalResult.requires_teacher_review,
-          status: evalResult.assessment_status
+          requiresTeacherReview: true,
+          status: isFailedOrOffline ? 'perlu_review_guru' : evalResult.assessment_status,
+          isPendingEvaluation: finalQScore === undefined
         };
 
         updatedAnswers[q.id] = qAns;
@@ -411,9 +419,11 @@ class AIEvaluationQueueManager {
           // Batas maksimum retry tercapai
           sub.aiGradingStatus = 'failed';
           sub.requiresTeacherReview = true;
+          sub.hasPendingComponents = true;
+          sub.isScoreFinal = false;
           sub.status = 'perlu_pemeriksaan';
           sub.validationStatus = 'pending_review';
-          sub.teacherFollowUp = 'Penilaian otomatis AI mencapai batas percobaan (layanan API belum terpasang atau kuota limit). Jawaban siswa tersimpan utuh dan menunggu penilaian langsung oleh Guru.';
+          sub.teacherFollowUp = 'Penilaian otomatis AI mencapai batas percobaan (layanan API belum terpasang atau kuota limit). Jawaban siswa tersimpan utuh tanpa nilai buatan dan menunggu penilaian langsung oleh Guru Penguji.';
           console.warn(`[AI Worker] Submission ${submissionId} gagal dinilai setelah ${this.MAX_RETRIES} percobaan. Menyerahkan ke guru.`);
         }
       } else {
@@ -421,11 +431,13 @@ class AIEvaluationQueueManager {
         sub.aiGradingStatus = 'completed';
         sub.aiGradingError = undefined;
         sub.aiGradingNextRetryAt = undefined;
+        sub.hasPendingComponents = false;
 
         if (!sub.validatedBy && sub.validationStatus !== 'approved' && sub.validationStatus !== 'revised') {
           sub.requiresTeacherReview = true;
           sub.status = 'perlu_pemeriksaan';
           sub.validationStatus = 'pending_review';
+          sub.isScoreFinal = false; // Nilai belum final sebelum disahkan guru!
         }
         sub.teacherFollowUp = 'Penilaian otomatis AI telah selesai sesuai rubrik. Menunggu validasi atau revisi nilai oleh guru penguji.';
         console.log(`[AI Worker] ✅ Evaluasi AI SUKSES untuk ${sub.studentName} (${sub.id}). Skor Total: ${sub.totalScore}/100`);

@@ -1725,24 +1725,27 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
       }
       autoScoreTotal += earnedScore;
     } else if (q.type === 'essay') {
-      const textToEval = (qAns.essayAnswer || '').trim();
-      const hasEvidence = qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0;
-      if (textToEval || hasEvidence) {
-        const proposedScore = typeof qAns.score === 'number' ? qAns.score : Math.round(qMax * 0.75);
-        earnedScore = Math.min(qMax, Math.max(0, proposedScore));
+      if (typeof qAns.score === 'number') {
+        earnedScore = Math.min(qMax, Math.max(0, qAns.score));
       } else {
+        // Komponen esai belum dinilai secara sah: JANGAN berikan nilai positif buatan (75%) atau perkiraan!
         earnedScore = 0;
       }
       essayScoreTotal += earnedScore;
     } else {
-      earnedScore = Math.min(qMax, Math.max(0, qAns.score || 0));
+      if (typeof qAns.score === 'number') {
+        earnedScore = Math.min(qMax, Math.max(0, qAns.score));
+      } else {
+        earnedScore = 0;
+      }
     }
 
     totalRawScore += earnedScore;
     enrichedAnswers[q.id] = {
       ...qAns,
-      score: Math.min(qMax, Math.max(0, earnedScore)),
-      maxScore: qMax
+      score: typeof qAns.score === 'number' ? Math.min(qMax, Math.max(0, qAns.score)) : undefined,
+      maxScore: qMax,
+      isPendingEvaluation: typeof qAns.score !== 'number' && (q.type === 'essay' || q.type === 'analisis_kasus' || q.type === 'short_answer' || (qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0))
     };
   });
 
@@ -1776,9 +1779,20 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     (submission.evidences && submission.evidences.length > 0) ||
     Object.values(submission.answers || {}).some((a: any) => a.multimodalEvidences && a.multimodalEvidences.length > 0)
   );
+  // Periksa apakah masih ada komponen esai/subjektif yang belum dinilai (pending / undefined)
+  const hasPendingComponents = canonicalQuestions.some(q => {
+    const isSubjective = ['essay', 'analisis_kasus', 'scenario_assessment'].includes(q.type);
+    const ans = enrichedAnswers[q.id];
+    return isSubjective && typeof ans?.score !== 'number';
+  });
 
-  const needsReview = hasSubjective || hasMultimodalEvidence || submission.requiresTeacherReview;
-  if (!submission.validatedBy && submission.validationStatus !== 'approved' && submission.validationStatus !== 'revised') {
+  const isTeacherValidated = submission.validationStatus === 'approved' || submission.validationStatus === 'revised' || Boolean(submission.validatedBy);
+
+  submission.hasPendingComponents = Boolean(hasPendingComponents);
+  submission.isScoreFinal = !hasPendingComponents && isTeacherValidated;
+
+  if (!isTeacherValidated) {
+    const needsReview = hasSubjective || hasMultimodalEvidence || hasPendingComponents || submission.requiresTeacherReview;
     submission.requiresTeacherReview = Boolean(needsReview);
     submission.status = needsReview ? 'perlu_pemeriksaan' : 'dinilai';
     submission.validationStatus = 'pending_review';
@@ -1996,6 +2010,14 @@ app.put("/api/submissions/:id", requireAuth, requireRole("admin", "guru"), (req:
   const updated: ExamSubmission = req.body;
 
   extractEvidenceBase64FromSubmission(updated);
+
+  // Jika guru menyetujui atau merevisi, finalisasi status penilaian
+  if (updated.validationStatus === 'approved' || updated.validationStatus === 'revised') {
+    updated.status = 'dinilai';
+    updated.isScoreFinal = true;
+    updated.hasPendingComponents = false;
+    updated.requiresTeacherReview = false;
+  }
 
   const idx = db.submissions.findIndex((s) => s.id === id);
   if (idx >= 0) {

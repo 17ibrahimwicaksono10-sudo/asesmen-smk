@@ -145,9 +145,9 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
         const evalData = await evalResp.json();
         if (evalData.success && evalData.rubricScore) {
           const scoreRes: AIRubricScoreResult = evalData.rubricScore;
-          const assignedScore = scoreRes.totalScoreGiven !== undefined
+          const assignedScore = typeof scoreRes.totalScoreGiven === 'number'
             ? scoreRes.totalScoreGiven
-            : Math.round((questionObj?.points || 10) * 0.8);
+            : (typeof selectedAnswer.score === 'number' ? selectedAnswer.score : undefined);
 
           // Update answer di submission
           const updatedAnswers = {
@@ -155,6 +155,7 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
             [selectedQuestionId]: {
               ...selectedAnswer,
               score: assignedScore,
+              isPendingEvaluation: assignedScore === undefined,
               aiRubricScoring: scoreRes,
               teacherFeedback: scoreRes.constructiveFeedback,
               multimodalEvidences: updatedEvidences
@@ -270,6 +271,8 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
       validatedBy: teacherName,
       validatedAt: timestamp,
       requiresTeacherReview: action === 'return',
+      hasPendingComponents: action === 'return',
+      isScoreFinal: action !== 'return',
       teacherFollowUp:
         action === 'approve'
           ? 'Hasil evaluasi AI disetujui 100% oleh Guru Evaluator tanpa revisi.'
