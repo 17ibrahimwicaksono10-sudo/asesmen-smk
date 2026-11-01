@@ -276,131 +276,133 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Load persistent data from Backend Database
-  useEffect(() => {
-    async function loadBackendData() {
-      setIsInitialLoading(true);
-      setLoadError(null);
+  const loadBackendData = React.useCallback(async () => {
+    setIsInitialLoading(true);
+    setLoadError(null);
 
-      // 1. Verifikasi dan pulihkan auth token jika tersimpan di sesi browser
-      try {
-        const storedToken = getAuthToken();
-        if (storedToken) {
-          const tokenRes = await fetch('/api/auth/restore-token', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${storedToken}`
-            },
-            body: JSON.stringify({ token: storedToken })
-          });
-          const tokenJson = await tokenRes.json().catch(() => ({}));
-          if (tokenRes.ok && tokenJson.token) {
-            setAuthToken(tokenJson.token);
-            if (tokenJson.user) {
-              setCurrentUser(tokenJson.user);
-              try {
-                localStorage.setItem('voc_user', JSON.stringify(tokenJson.user));
-              } catch {}
-            }
-            console.log('[Frontend] Sesi autentikasi berhasil dipulihkan secara aman.');
-          } else {
-            // Sesi kedaluwarsa atau token tidak valid: hapus dari browser
-            setAuthToken(null);
-            setCurrentUser(null);
+    // 1. Verifikasi dan pulihkan auth token jika tersimpan di sesi browser
+    try {
+      const storedToken = getAuthToken();
+      if (storedToken) {
+        const tokenRes = await fetch('/api/auth/restore-token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${storedToken}`
+          },
+          body: JSON.stringify({ token: storedToken })
+        });
+        const tokenJson = await tokenRes.json().catch(() => ({}));
+        if (tokenRes.ok && tokenJson.token) {
+          setAuthToken(tokenJson.token);
+          if (tokenJson.user) {
+            setCurrentUser(tokenJson.user);
             try {
-              localStorage.removeItem('voc_token');
-              localStorage.removeItem('voc_user');
-            } catch {}
-            console.warn('[Frontend] Sesi tersimpan tidak valid atau telah kedaluwarsa.');
-          }
-        }
-      } catch (tokenErr) {
-        console.warn('[Frontend] Gagal memeriksa pemulihan auth token:', tokenErr);
-      }
-
-      // 2. Ambil data bootstrap dari backend
-      try {
-        const json = await apiGet('/api/bootstrap');
-        if (json.success && json.data) {
-          const { users, schools: s, classes: c, teachers: t, packages: p, exams: e, submissions: sub, archives: a, settings: set, portfolios: port } = json.data;
-          if (Array.isArray(s)) setSchools(s);
-          if (Array.isArray(c)) setClasses(c);
-          if (Array.isArray(t)) {
-            setTeachers(t);
-            try {
-              localStorage.setItem('voc_teachers', JSON.stringify(t));
+              localStorage.setItem('voc_user', JSON.stringify(tokenJson.user));
             } catch {}
           }
-          if (Array.isArray(p)) {
-            setPackages(p);
-            try {
-              localStorage.setItem('voc_packages', JSON.stringify(p));
-            } catch {}
-          }
-          if (Array.isArray(e)) {
-            setExams(e);
-            try {
-              localStorage.setItem('voc_exams', JSON.stringify(e));
-            } catch {}
-          }
-          if (Array.isArray(sub)) setSubmissions(sub);
-          if (Array.isArray(a)) setArchives(a);
-          if (set) setSettings(set);
-          if (Array.isArray(port) && port.length > 0) {
-            setPortfolios(port);
-            try {
-              localStorage.setItem('voc_portfolios', JSON.stringify(port));
-            } catch {}
-          }
-          if (Array.isArray(users) || Array.isArray(t)) {
-            setRegisteredUsers(() => {
-              const map = new Map<string, User>();
-              if (Array.isArray(users)) {
-                users.forEach((u: User) => map.set(u.email.toLowerCase(), u));
-              }
-              if (Array.isArray(t)) {
-                t.forEach((item: Teacher) => {
-                  map.set(item.email.toLowerCase(), {
-                    id: item.id,
-                    name: item.name,
-                    email: item.email,
-                    role: 'guru',
-                    identityNo: item.identityNo,
-                    schoolId: item.schoolId,
-                    schoolName: item.schoolName,
-                    phone: item.phone,
-                    password: item.password || '123456'
-                  });
-                });
-              }
-              const merged = Array.from(map.values());
-              try {
-                localStorage.setItem('voc_registered_users', JSON.stringify(merged));
-              } catch {}
-              return merged;
-            });
-          }
-          console.log('[Frontend] Data berhasil disinkronkan dari database backend.');
+          console.log('[Frontend] Sesi autentikasi berhasil dipulihkan secara aman.');
         } else {
-          setLoadError(json.error || 'Gagal memuat data dari database.');
+          // Sesi kedaluwarsa atau token tidak valid: hapus dari browser
+          setAuthToken(null);
+          setCurrentUser(null);
+          try {
+            localStorage.removeItem('voc_token');
+            localStorage.removeItem('voc_user');
+          } catch {}
+          console.warn('[Frontend] Sesi tersimpan tidak valid atau telah kedaluwarsa.');
         }
-      } catch (err: any) {
-        console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
-        setLoadError('Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
-      } finally {
-        setIsInitialLoading(false);
       }
+    } catch (tokenErr) {
+      console.warn('[Frontend] Gagal memeriksa pemulihan auth token:', tokenErr);
     }
-    loadBackendData();
+
+    // 2. Ambil data bootstrap dari backend
+    try {
+      const json = await apiGet('/api/bootstrap');
+      if (json.success && json.data) {
+        const { users, schools: s, classes: c, teachers: t, packages: p, exams: e, submissions: sub, archives: a, settings: set, portfolios: port } = json.data;
+        if (Array.isArray(s)) setSchools(s);
+        if (Array.isArray(c)) setClasses(c);
+        if (Array.isArray(t)) {
+          setTeachers(t);
+          try {
+            localStorage.setItem('voc_teachers', JSON.stringify(t));
+          } catch {}
+        }
+        if (Array.isArray(p)) {
+          setPackages(p);
+          try {
+            localStorage.setItem('voc_packages', JSON.stringify(p));
+          } catch {}
+        }
+        if (Array.isArray(e)) {
+          setExams(e);
+          try {
+            localStorage.setItem('voc_exams', JSON.stringify(e));
+          } catch {}
+        }
+        if (Array.isArray(sub)) setSubmissions(sub);
+        if (Array.isArray(a)) setArchives(a);
+        if (set) setSettings(set);
+        if (Array.isArray(port) && port.length > 0) {
+          setPortfolios(port);
+          try {
+            localStorage.setItem('voc_portfolios', JSON.stringify(port));
+          } catch {}
+        }
+        if (Array.isArray(users) || Array.isArray(t)) {
+          setRegisteredUsers(() => {
+            const map = new Map<string, User>();
+            if (Array.isArray(users)) {
+              users.forEach((u: User) => map.set(u.email.toLowerCase(), u));
+            }
+            if (Array.isArray(t)) {
+              t.forEach((item: Teacher) => {
+                map.set(item.email.toLowerCase(), {
+                  id: item.id,
+                  name: item.name,
+                  email: item.email,
+                  role: 'guru',
+                  identityNo: item.identityNo,
+                  schoolId: item.schoolId,
+                  schoolName: item.schoolName,
+                  phone: item.phone,
+                  password: item.password || '123456'
+                });
+              });
+            }
+            const merged = Array.from(map.values());
+            try {
+              localStorage.setItem('voc_registered_users', JSON.stringify(merged));
+            } catch {}
+            return merged;
+          });
+        }
+        console.log('[Frontend] Data berhasil disinkronkan dari database backend.');
+      } else {
+        setLoadError(json.error || 'Gagal memuat data dari database.');
+      }
+    } catch (err: any) {
+      console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
+      setLoadError('Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
+    } finally {
+      setIsInitialLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    loadBackendData();
+  }, [loadBackendData]);
+
   // Handlers for Auth
-  const handleLoginSuccess = (user: User) => {
+  const handleLoginSuccess = async (user: User) => {
     setCurrentUser(user);
     try {
       localStorage.setItem('voc_user', JSON.stringify(user));
     } catch {}
     setActiveTab('overview');
+    await loadBackendData();
   };
 
   const handleLogout = () => {
@@ -994,7 +996,9 @@ export default function App() {
         studentName={currentUser.name}
         studentNis={currentUser.identityNo}
         studentEmail={currentUser.email}
-        schoolName={currentUser.schoolName}
+        schoolId={currentUser.schoolId || runningExam.exam.schoolId}
+        schoolName={currentUser.schoolName || runningExam.exam.schoolName}
+        classId={currentUser.classId || runningExam.exam.classId}
         className={currentUser.className || 'XII Kimia Analitik 1'}
         onSubmitExam={handleSubmitExamRunner}
         onCancelExam={() => {

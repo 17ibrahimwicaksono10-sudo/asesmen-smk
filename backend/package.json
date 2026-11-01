@@ -14,6 +14,7 @@
     "emergency:reset-password": "node dist/emergency_reset_password.js",
     "dev:rollback:database": "tsx src/safe_rollback_database.ts",
     "dev:emergency:reset-password": "tsx src/emergency_reset_password.ts",
+    "verify:api": "node src/verify_live_api_connectivity.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

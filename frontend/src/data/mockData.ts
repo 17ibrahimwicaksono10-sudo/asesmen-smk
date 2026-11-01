@@ -16,18 +16,18 @@ export const INITIAL_SETTINGS: SystemSettings = {
   providers: [
     {
       id: 'prov-deepseek-flash',
-      name: 'Deepseek v4 Flash',
+      name: 'DeepSeek Chat (V3)',
       type: 'Deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-chat',
       apiKey: 'sk-987d****************',
       baseUrl: 'https://api.deepseek.com',
       status: 'Active'
     },
     {
       id: 'prov-deepseek-pro',
-      name: 'Deepseek v4 Pro',
+      name: 'DeepSeek Reasoner (R1)',
       type: 'Deepseek',
-      model: 'deepseek-v4-pro',
+      model: 'deepseek-reasoner',
       apiKey: 'sk-987d****************',
       baseUrl: 'https://api.deepseek.com',
       status: 'Active'
@@ -61,7 +61,7 @@ export const INITIAL_SETTINGS: SystemSettings = {
   },
   // Legacy fields
   deepseekApiKey: '',
-  deepseekModel: 'deepseek-v4-flash',
+  deepseekModel: 'deepseek-chat',
   deepseekEnabled: true,
   deepseekBaseUrl: 'https://api.deepseek.com',
 };

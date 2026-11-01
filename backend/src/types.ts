@@ -60,7 +60,8 @@ export type QuestionType =
   | 'short_answer'
   | 'essay'
   | 'essay_subquestions'
-  | 'scenario_assessment';
+  | 'scenario_assessment'
+  | 'analisis_kasus';
 
 export interface SubQuestion {
   id: string;
@@ -73,6 +74,7 @@ export interface SubQuestion {
 export interface StatementItem {
   id: string;
   text: string;
+  statement?: string;
   options: string[]; // e.g. ['Sesuai', 'Tidak Sesuai'] or ['Tepat', 'Tidak Tepat'] or ['Benar', 'Salah']
   correctAnswer: string;
 }
@@ -119,6 +121,11 @@ export interface QuestionItem {
   subQuestions?: SubQuestion[];
   points?: number;
   maxScore?: number;
+  requiresMultimodal?: boolean;
+  allowedEvidenceTypes?: string[];
+  instructions?: string;
+  contextText?: string;
+  dataTables?: any[];
 }
 
 export interface QuestionPackage {
@@ -165,7 +172,7 @@ export interface Exam {
 
 export type AIGradingStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
-export type ModalityType = 'audio' | 'handwriting' | 'document';
+export type ModalityType = 'audio' | 'handwriting' | 'document' | 'tulisan_tangan' | 'image';
 
 export interface UnreadableFlag {
   segment: string;
@@ -290,6 +297,7 @@ export interface StudentAnswer {
   aiRubricScoring?: AIRubricScoreResult;
   score?: number;
   maxScore?: number;
+  isPendingEvaluation?: boolean; // Komponen belum dinilai / pending penilaian guru
   teacherFeedback?: string;
 }
 
@@ -351,18 +359,27 @@ export interface ExamSubmission {
   allowRetake?: boolean;
   answers: Record<string, StudentAnswer>;
   totalScore: number;
+  rawScoreTotal?: number;
+  maxRawScore?: number;
   technicalScore: number;
   employabilityScore: number;
   autoScore?: number;
   essayScore?: number;
   originalAIScoreTotal?: number; // Preserves raw AI score for audit comparison
   teacherScoreTotal?: number;    // Final score confirmed by human teacher
+  hasPendingComponents?: boolean; // True jika masih ada komponen wajib yang belum dinilai
+  isScoreFinal?: boolean;         // True jika seluruh komponen telah dinilai dan disahkan
   status: 'perlu_pemeriksaan' | 'dinilai';
   validationStatus?: 'pending_review' | 'approved' | 'revised' | 'returned';
   validatedBy?: string;          // Teacher name/NIP validator identity
   validatedAt?: string;          // Timestamp of teacher validation
   aiGradingStatus?: AIGradingStatus;
   aiGradedAt?: string;
+  aiGradingAttempts?: number;
+  aiGradingLastAttemptAt?: string;
+  aiGradingNextRetryAt?: string;
+  aiGradingError?: string;
+  aiGradingLockedAt?: string;
   teacherFollowUp?: string;
   aiEvaluation?: string;
   evidences?: MultimodalEvidence[];

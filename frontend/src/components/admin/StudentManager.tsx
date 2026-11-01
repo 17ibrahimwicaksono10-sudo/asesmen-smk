@@ -283,7 +283,7 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
                   <td className="py-3.5 px-4">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white font-black text-xs flex items-center justify-center shrink-0 shadow-sm">
-                        {std.name.charAt(0).toUpperCase()}
+                        {(std.name || '?').charAt(0).toUpperCase()}
                       </div>
                       <div>
                         <div className="font-bold text-white leading-tight">{std.name}</div>

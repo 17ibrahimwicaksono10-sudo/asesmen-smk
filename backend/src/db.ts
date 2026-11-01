@@ -42,6 +42,8 @@ export interface DatabaseSchema {
   archives: ArchivedItem[];
   settings: SystemSettings;
   portfolios: PortfolioItem[];
+  drafts?: Record<string, any>;
+  readinessProfiles?: Record<string, any>;
   lastUpdated: string;
 }
 

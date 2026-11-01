@@ -87,7 +87,7 @@ export const PrintReportModal: React.FC<PrintReportModalProps> = ({
             <div className="border-b-2 border-slate-900 pb-4 flex justify-between items-start print-avoid-break">
               <div>
                 <div className="text-[10px] uppercase font-mono tracking-widest text-slate-500">KEMENTERIAN PENDIDIKAN, KEBUDAYAAN, RISET DAN TEKNOLOGI</div>
-                <h2 className="text-base font-black text-slate-900 mt-0.5">{schoolName.toUpperCase()}</h2>
+                <h2 className="text-base font-black text-slate-900 mt-0.5">{(schoolName || 'SMK').toUpperCase()}</h2>
                 <p className="text-[11px] text-slate-600">MODEL ASESMEN KOMPETENSI VOKASI KIMIA INDUSTRI & EMPLOYABILITY SKILLS</p>
               </div>
               <div className="text-right">

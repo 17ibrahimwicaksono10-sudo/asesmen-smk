@@ -946,8 +946,8 @@ export function calculateAssessmentScore(answers: Record<string, any>, questions
       else if (q.type === 'complex_mcq') {
         // Dukung checkbox array selectedOptions
         if (Array.isArray(ans.selectedOptions)) {
-          const studentLetters = ans.selectedOptions.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
-          const correctLetters = (q.correctAnswers || []).map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
+          const studentLetters = ans.selectedOptions.map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
+          const correctLetters = (q.correctAnswers || []).map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
           let matchCount = 0;
           studentLetters.forEach((letter: string) => {
             if (correctLetters.includes(letter)) {
