@@ -62,11 +62,32 @@ jobs:
               sha256sum "${DB_BACKUP}" > "${DB_BACKUP}.sha256"
               echo "Database backup created: ${DB_BACKUP}"
             fi
-            if [ -f /home/ubuntu/Prototype/backend/data/.auth_secret ]; then
-              cp /home/ubuntu/Prototype/backend/data/.auth_secret "/home/ubuntu/asesmen-backups/.auth_secret-${TIMESTAMP}"
+
+            # 2. Backup persistent multimodal evidence storage (gambar, audio, dokumen) with SHA-256
+            if [ -d /home/ubuntu/Prototype/backend/data/evidence_storage ]; then
+              EVIDENCE_BACKUP="/home/ubuntu/asesmen-backups/evidence_storage-${TIMESTAMP}.tar.gz"
+              tar -czf "${EVIDENCE_BACKUP}" -C /home/ubuntu/Prototype/backend/data evidence_storage
+              sha256sum "${EVIDENCE_BACKUP}" > "${EVIDENCE_BACKUP}.sha256"
+              echo "Multimodal evidence storage backup created: ${EVIDENCE_BACKUP}"
             fi
 
-            # 2. Snapshot current active code with timestamp and commit SHA
+            # 3. Backup secret token key and backend env configuration securely (chmod 600, zero credential logging)
+            if [ -f /home/ubuntu/Prototype/backend/data/.auth_secret ]; then
+              AUTH_SECRET_BACKUP="/home/ubuntu/asesmen-backups/.auth_secret-${TIMESTAMP}"
+              cp /home/ubuntu/Prototype/backend/data/.auth_secret "${AUTH_SECRET_BACKUP}"
+              chmod 600 "${AUTH_SECRET_BACKUP}"
+              sha256sum "${AUTH_SECRET_BACKUP}" > "${AUTH_SECRET_BACKUP}.sha256"
+              echo "Auth secret backup created securely."
+            fi
+            if [ -f /home/ubuntu/Prototype/backend/.env ]; then
+              ENV_BACKUP="/home/ubuntu/asesmen-backups/backend-env-${TIMESTAMP}"
+              cp /home/ubuntu/Prototype/backend/.env "${ENV_BACKUP}"
+              chmod 600 "${ENV_BACKUP}"
+              sha256sum "${ENV_BACKUP}" > "${ENV_BACKUP}.sha256"
+              echo "Backend environment configuration backup created securely."
+            fi
+
+            # 4. Snapshot current active code with timestamp and commit SHA
             SNAPSHOT_DIR="/home/ubuntu/asesmen-code-backups/release-${TIMESTAMP}-${SHORT_SHA}"
             if [ -f /home/ubuntu/Prototype/compose.yaml ]; then
               mkdir -p "${SNAPSHOT_DIR}"
@@ -85,8 +106,8 @@ jobs:
               echo "Immutable code snapshot saved to ${SNAPSHOT_DIR} and previous_release"
             fi
 
-            # Clean database backups older than 14 days and code snapshots older than 30 days
-            find /home/ubuntu/asesmen-backups -maxdepth 1 -type f -name "database-*.json*" -mtime +14 -delete
+            # Clean all backups older than 14 days and code snapshots older than 30 days
+            find /home/ubuntu/asesmen-backups -maxdepth 1 -type f \( -name "database-*" -o -name "evidence_storage-*" -o -name "backend-env-*" -o -name ".auth_secret-*" \) -mtime +14 -delete
             find /home/ubuntu/asesmen-code-backups -mindepth 1 -maxdepth 1 -type d -name "release-*" -mtime +30 -exec rm -rf {} +
           '
 

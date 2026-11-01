@@ -64,24 +64,44 @@ async function runResilienceTests() {
   }
 
   // 1. Health & Environment Status
-  console.log('--- PEMERIKSAAN LINGKUNGAN API & STATUS WORKER ---');
+  console.log('--- PEMERIKSAAN LINGKUNGAN API & SANITASI ENDPOINT HEALTH ---');
   let healthInfo = null;
-  await test('GET /api/health mengembalikan status penyedia AI dan status antrean', async () => {
+  await test('GET /api/health publik steril: tidak mengungkap antrean internal atau activeSubmissionIds', async () => {
     const res = await request('/api/health');
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.body.status, 'ok');
     healthInfo = res.body;
-    assert.strictEqual(typeof healthInfo.geminiKeyConfigured, 'boolean');
-    assert.strictEqual(typeof healthInfo.deepseekKeyConfigured, 'boolean');
-    assert(healthInfo.aiQueue, 'Harus memuat status aiQueue');
-    assert.strictEqual(typeof healthInfo.aiQueue.queueLength, 'number');
-    assert.strictEqual(typeof healthInfo.aiQueue.activeJobsCount, 'number');
-    
-    // Klasifikasi lingkungan: Mock vs Real API
-    const isRealGemini = healthInfo.geminiKeyConfigured;
-    const isRealDeepSeek = healthInfo.deepseekKeyConfigured;
-    console.log(`     [Lingkungan API] Gemini Vision/STT: ${isRealGemini ? 'Terkonfigurasi (Kunci Aktif)' : 'Mode Aman Offline / Mock Fallback'}`);
-    console.log(`     [Lingkungan API] DeepSeek Grading : ${isRealDeepSeek ? 'Terkonfigurasi (Kunci Aktif)' : 'Mode Aman Offline / Mock Fallback'}`);
+    assert.strictEqual(typeof healthInfo.geminiConfigured, 'boolean');
+    assert.strictEqual(typeof healthInfo.deepseekConfigured, 'boolean');
+    assert.strictEqual(typeof healthInfo.aiWorkerActive, 'boolean');
+    assert.strictEqual(typeof healthInfo.port, 'number');
+
+    // Keamanan Ketat: Jangan bocorkan antrean internal, ID siswa, atau activeSubmissionIds ke publik
+    assert.strictEqual(healthInfo.activeSubmissionIds, undefined, 'Endpoint publik TIDAK BOLEH memuat activeSubmissionIds');
+    assert.strictEqual(healthInfo.aiQueue, undefined, 'Endpoint publik TIDAK BOLEH memuat objek aiQueue');
+    assert.strictEqual(healthInfo.secret, undefined, 'Endpoint publik TIDAK BOLEH memuat secret');
+    assert.strictEqual(healthInfo.token, undefined, 'Endpoint publik TIDAK BOLEH memuat token');
+
+    console.log(`     [Sanitasi Health] Public API aman & minimal: status="ok", aiWorkerActive=${healthInfo.aiWorkerActive}`);
+  });
+
+  await test('GET /api/admin/ai-queue/status dilindungi autentikasi admin', async () => {
+    // 1. Akses tanpa token harus ditolak 401
+    const unauthRes = await request('/api/admin/ai-queue/status');
+    assert.strictEqual(unauthRes.status, 401, 'Akses publik tanpa token harus 401 Unauthorized');
+
+    // 2. Akses dengan token admin harus berhasil 200 dan memuat detail antrean
+    const adminLogin = await login('admin@app.com', 'password');
+    const adminRes = await request('/api/admin/ai-queue/status', {
+      headers: { Authorization: `Bearer ${adminLogin.token}` }
+    });
+    assert.strictEqual(adminRes.status, 200);
+    assert(adminRes.body.success, 'Harus sukses untuk admin');
+    assert(adminRes.body.aiQueue, 'Admin berhak melihat status aiQueue');
+    assert.strictEqual(typeof adminRes.body.aiQueue.queueLength, 'number');
+    assert.strictEqual(typeof adminRes.body.aiQueue.activeJobsCount, 'number');
+    assert(Array.isArray(adminRes.body.aiQueue.activeSubmissionIds), 'activeSubmissionIds ada di kanal admin');
+    console.log(`     [Admin Queue] Status antrean terverifikasi khusus admin (Max Concurrent: ${adminRes.body.aiQueue.maxConcurrentJobs})`);
   });
 
   // Setup User Siswa & Guru
@@ -327,9 +347,12 @@ async function runResilienceTests() {
   // --------------------------------------------------------------------
   console.log('\n--- UJI 6: Penanganan Rate Limit & Pengendalian Konkurensi ---');
   await test('Antrean membatasi konkurensi (MAX_CONCURRENT_JOBS <= 2) untuk mencegah HTTP 429', async () => {
-    const health = await request('/api/health');
-    assert.strictEqual(health.status, 200);
-    const q = health.body.aiQueue;
+    const adminLogin = await login('admin@app.com', 'password');
+    const qRes = await request('/api/admin/ai-queue/status', {
+      headers: { Authorization: `Bearer ${adminLogin.token}` }
+    });
+    assert.strictEqual(qRes.status, 200);
+    const q = qRes.body.aiQueue;
     assert(q, 'Data antrean AI harus ada');
     assert(q.maxConcurrentJobs <= 2, `Batas konkurensi harus <= 2 (ditemukan: ${q.maxConcurrentJobs})`);
     assert(q.activeJobsCount <= q.maxConcurrentJobs, 'Pekerjaan aktif tidak melebihi batas konkurensi');

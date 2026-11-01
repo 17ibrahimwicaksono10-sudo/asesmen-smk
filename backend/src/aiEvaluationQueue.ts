@@ -367,6 +367,20 @@ class AIEvaluationQueueManager {
         updatedAnswers[q.id] = qAns;
       }
 
+      // Pengamanan Otoritas Guru terhadap Late-Completion:
+      // Re-cek database: Jika guru telah menyetujui atau merevisi nilai saat AI sedang berjalan di latar belakang,
+      // JANGAN timpa skor guru atau status validasi guru!
+      const currentSub = db.submissions?.find(s => s.id === submissionId);
+      if (currentSub && (currentSub.validationStatus === 'approved' || currentSub.validationStatus === 'revised' || currentSub.validatedBy)) {
+        console.warn(`[AI Worker] Nilai ${submissionId} (${sub.studentName}) telah disahkan/direvisi oleh guru selama AI berjalan. Mempertahankan skor guru.`);
+        currentSub.aiEvaluation = JSON.stringify(essayEvaluations);
+        currentSub.aiGradedAt = new Date().toISOString();
+        currentSub.aiGradingLockedAt = undefined;
+        currentSub.aiGradingStatus = 'completed';
+        saveDb();
+        return currentSub;
+      }
+
       sub.answers = updatedAnswers;
 
       // Hitung ulang skor total menggunakan kalkulator standar server

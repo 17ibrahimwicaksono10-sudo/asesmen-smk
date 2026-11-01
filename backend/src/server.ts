@@ -247,12 +247,22 @@ app.get("/api/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     app: "Sistem Asesmen & Profil Kesiapan Kerja - Backend API",
+    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
     geminiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
     deepseekEnabled: deepseekReady,
+    deepseekConfigured: Boolean(settings?.deepseekApiKey || process.env.DEEPSEEK_API_KEY),
     deepseekKeyConfigured: Boolean(settings?.deepseekApiKey || process.env.DEEPSEEK_API_KEY),
     activeAiProvider: deepseekReady ? "deepseek" : "gemini",
-    aiQueue: aiQueueManager.getStatus(),
+    aiWorkerActive: aiQueueManager.getStatus().isWorkerRunning,
     port: PORT,
+  });
+});
+
+// Endpoint Status Detail Antrean AI (Khusus Admin Terautentikasi - Memerlukan Token Admin)
+app.get("/api/admin/ai-queue/status", requireAuth, requireRole("admin"), (_req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    success: true,
+    aiQueue: aiQueueManager.getStatus(),
   });
 });
 
