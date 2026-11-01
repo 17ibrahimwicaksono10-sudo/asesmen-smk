@@ -41,7 +41,8 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
   onUpdateSubmission
 }) => {
   const getQuestionItem = (qId: string) => {
-    return packageObj?.questions.find((q) => q.id === qId)
+    return submission.questionSnapshot?.find((q) => q.id === qId)
+      || packageObj?.questions.find((q) => q.id === qId)
       || NON_TEST_QUESTIONS_18.find((q) => q.id === qId)
       || REVISED_QUESTIONS_24.find((q) => q.id === qId);
   };
@@ -529,8 +530,31 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
 
                           {/* Original Media Preview (Audit-Ready & Immutable) */}
                           {ev.modalityType === 'audio' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
-                            <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                              <audio controls src={ev.storageUrl || ev.fileData || ev.previewUrl} className="w-full h-8" />
+                            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
+                              <audio
+                                controls
+                                preload="metadata"
+                                src={ev.storageUrl || ev.fileData || ev.previewUrl}
+                                className="w-full h-8"
+                                onLoadedMetadata={(e) => {
+                                  const aud = e.currentTarget;
+                                  if (aud.duration === Infinity) {
+                                    aud.currentTime = 1e101;
+                                    aud.ontimeupdate = () => {
+                                      aud.ontimeupdate = null;
+                                      aud.currentTime = 0;
+                                    };
+                                  }
+                                }}
+                              />
+                              {ev.audioDurationSeconds !== undefined && ev.audioDurationSeconds > 0 && (
+                                <div className="flex items-center justify-between text-[11px] text-slate-400 px-1 font-mono">
+                                  <span>Durasi Terdata:</span>
+                                  <span className="font-semibold text-emerald-400">
+                                    {Math.floor(ev.audioDurationSeconds / 60)}:{(ev.audioDurationSeconds % 60).toString().padStart(2, '0')}
+                                  </span>
+                                </div>
+                              )}
                             </div>
                           )}
                           {ev.modalityType === 'handwriting' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (

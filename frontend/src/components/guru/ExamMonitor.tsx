@@ -807,8 +807,31 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
                                 {/* Preview Pemutar Audio */}
                                 {ev.modalityType === 'audio' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
-                                  <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                                    <audio controls src={ev.storageUrl || ev.fileData || ev.previewUrl} className="w-full h-8" />
+                                  <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
+                                    <audio
+                                      controls
+                                      preload="metadata"
+                                      src={ev.storageUrl || ev.fileData || ev.previewUrl}
+                                      className="w-full h-8"
+                                      onLoadedMetadata={(e) => {
+                                        const aud = e.currentTarget;
+                                        if (aud.duration === Infinity) {
+                                          aud.currentTime = 1e101;
+                                          aud.ontimeupdate = () => {
+                                            aud.ontimeupdate = null;
+                                            aud.currentTime = 0;
+                                          };
+                                        }
+                                      }}
+                                    />
+                                    {ev.audioDurationSeconds !== undefined && ev.audioDurationSeconds > 0 && (
+                                      <div className="flex items-center justify-between text-[11px] text-slate-400 px-1 font-mono">
+                                        <span>Durasi Terdata:</span>
+                                        <span className="font-semibold text-emerald-400">
+                                          {Math.floor(ev.audioDurationSeconds / 60)}:{(ev.audioDurationSeconds % 60).toString().padStart(2, '0')}
+                                        </span>
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
@@ -1393,11 +1416,33 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
                                 {/* Preview Pemutar Audio Suara Siswa */}
                                 {ev.modalityType === 'audio' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
-                                  <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1">
-                                    <div className="text-[11px] text-slate-400 font-semibold mb-1 flex items-center gap-1">
-                                      <Volume2 className="w-3.5 h-3.5 text-rose-400" /> Pemutar Suara Rekaman Siswa:
+                                  <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
+                                    <div className="text-[11px] text-slate-400 font-semibold flex items-center justify-between">
+                                      <span className="flex items-center gap-1">
+                                        <Volume2 className="w-3.5 h-3.5 text-rose-400" /> Pemutar Suara Rekaman Siswa:
+                                      </span>
+                                      {ev.audioDurationSeconds !== undefined && ev.audioDurationSeconds > 0 && (
+                                        <span className="text-emerald-400 font-mono">
+                                          {Math.floor(ev.audioDurationSeconds / 60)}:{(ev.audioDurationSeconds % 60).toString().padStart(2, '0')}
+                                        </span>
+                                      )}
                                     </div>
-                                    <audio controls src={ev.storageUrl || ev.fileData || ev.previewUrl} className="w-full h-9" />
+                                    <audio
+                                      controls
+                                      preload="metadata"
+                                      src={ev.storageUrl || ev.fileData || ev.previewUrl}
+                                      className="w-full h-9"
+                                      onLoadedMetadata={(e) => {
+                                        const aud = e.currentTarget;
+                                        if (aud.duration === Infinity) {
+                                          aud.currentTime = 1e101;
+                                          aud.ontimeupdate = () => {
+                                            aud.ontimeupdate = null;
+                                            aud.currentTime = 0;
+                                          };
+                                        }
+                                      }}
+                                    />
                                   </div>
                                 )}
 

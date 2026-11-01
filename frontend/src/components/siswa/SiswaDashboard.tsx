@@ -94,9 +94,10 @@ export const SiswaDashboard: React.FC<SiswaDashboardProps> = ({
   // Helper deteksi kategori submission (Teknis Kimia vs Employability)
   const isSubmissionTechnical = (s: ExamSubmission) => {
     const parentExam = exams.find(e => e.id === s.examId);
-    const pkg = parentExam?.package;
-    if (pkg?.category === 'teknis_kimia' || pkg?.id?.includes('teknis') || pkg?.id?.includes('full-24')) return true;
-    if (pkg?.category === 'employability' || pkg?.id?.includes('employability') || pkg?.id?.includes('non-tes')) return false;
+    const category = parentExam?.category;
+    const pkgId = parentExam?.packageId;
+    if (category === 'teknis_kimia' || pkgId?.includes('teknis') || pkgId?.includes('full-24')) return true;
+    if (category === 'employability' || pkgId?.includes('employability') || pkgId?.includes('non-tes')) return false;
     const title = (s.examTitle || parentExam?.title || '').toLowerCase();
     if (title.includes('non-tes') || title.includes('employability') || title.includes('sikap') || title.includes('karakter')) return false;
     if (title.includes('teknis') || title.includes('kimia') || title.includes('kejuruan') || title.includes('vokasi') || title.includes('k3lh') || title.includes('analisis')) return true;
@@ -108,9 +109,10 @@ export const SiswaDashboard: React.FC<SiswaDashboardProps> = ({
 
   const isSubmissionEmployability = (s: ExamSubmission) => {
     const parentExam = exams.find(e => e.id === s.examId);
-    const pkg = parentExam?.package;
-    if (pkg?.category === 'employability' || pkg?.id?.includes('employability') || pkg?.id?.includes('non-tes')) return true;
-    if (pkg?.category === 'teknis_kimia' || pkg?.id?.includes('teknis') || pkg?.id?.includes('full-24')) return false;
+    const category = parentExam?.category;
+    const pkgId = parentExam?.packageId;
+    if (category === 'employability' || pkgId?.includes('employability') || pkgId?.includes('non-tes')) return true;
+    if (category === 'teknis_kimia' || pkgId?.includes('teknis') || pkgId?.includes('full-24')) return false;
     const title = (s.examTitle || parentExam?.title || '').toLowerCase();
     if (title.includes('non-tes') || title.includes('employability') || title.includes('sikap') || title.includes('karakter')) return true;
     const ansKeys = Object.keys(s.answers || {});

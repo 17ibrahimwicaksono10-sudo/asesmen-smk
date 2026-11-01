@@ -13,7 +13,8 @@ import {
   INITIAL_PORTFOLIOS
 } from './data/mockData';
 import { REVISED_QUESTIONS_24 } from './data/revisedQuestions';
-import { LayoutDashboard, ClipboardList, Award, Briefcase, Menu, Users, BarChart3, GraduationCap, Settings } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, Award, Briefcase, Menu, Users, BarChart3, GraduationCap, Settings, AlertTriangle } from 'lucide-react';
+import { apiGet, apiPost, apiPut, apiDelete, apiFetch, clearAuthToken, getAuthToken, setAuthToken } from './services/api';
 
 // Layout Components
 import { Header } from './components/layout/Header';
@@ -43,45 +44,18 @@ import { WorkReadinessProfile } from './components/siswa/WorkReadinessProfile';
 import { SiswaPortfolio } from './components/siswa/SiswaPortfolio';
 
 export default function App() {
-  // Auth State: default null agar pengguna baru (siswa pilot test) selalu disambut modal Login / Registrasi
+  // Auth State: Pulihkan user aktif dari localStorage jika sesi valid (admin, guru, atau siswa)
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     try {
       const saved = localStorage.getItem('voc_user');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.email === 'admin@app.com') return parsed;
+        if (parsed && parsed.id && parsed.role) return parsed;
       }
     } catch {}
     return null;
   });
   const [registeredUsers, setRegisteredUsers] = useState<User[]>([]);
-
-  // Otomatis bersihkan cache lokal lama agar browser pengguna sinkron murni ke backend (fresh pilot state)
-  useEffect(() => {
-    try {
-      const resetKey = 'voc_clean_pilot_reset_2026_v4';
-      if (!localStorage.getItem(resetKey)) {
-        localStorage.removeItem('voc_registered_users');
-        localStorage.removeItem('voc_teachers');
-        localStorage.removeItem('voc_portfolios');
-        localStorage.removeItem('voc_validated_profiles');
-        const cur = localStorage.getItem('voc_user');
-        if (cur) {
-          const parsed = JSON.parse(cur);
-          if (parsed.email === 'admin@app.com') {
-            parsed.name = 'Ibrahim Wicaksono, S.Pd.';
-            localStorage.setItem('voc_user', JSON.stringify(parsed));
-            setCurrentUser(parsed);
-          } else {
-            localStorage.removeItem('voc_user');
-            setCurrentUser(null);
-          }
-        }
-        localStorage.setItem(resetKey, 'done');
-        console.log('[Frontend] Cache lokal lama berhasil dibersihkan untuk fresh pilot testing (v4).');
-      }
-    } catch {}
-  }, []);
 
   // Strictly filter only registered & preset students (role: 'siswa') without duplicates
   const allStudents = React.useMemo(() => {
@@ -123,8 +97,20 @@ export default function App() {
     );
   }, [classes, currentUser]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
-  const [packages, setPackages] = useState<QuestionPackage[]>(INITIAL_PACKAGES);
-  const [exams, setExams] = useState<Exam[]>([]);
+  const [packages, setPackages] = useState<QuestionPackage[]>(() => {
+    try {
+      const saved = localStorage.getItem('voc_packages');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return INITIAL_PACKAGES;
+  });
+  const [exams, setExams] = useState<Exam[]>(() => {
+    try {
+      const saved = localStorage.getItem('voc_exams');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
   const [submissions, setSubmissions] = useState<ExamSubmission[]>([]);
   const [archives, setArchives] = useState<ArchivedItem[]>([]);
   const [settings, setSettings] = useState<SystemSettings>(INITIAL_SETTINGS);
@@ -275,15 +261,66 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
 
-  // Exam Taking Runner State
-  const [runningExam, setRunningExam] = useState<{ exam: Exam; pkg: QuestionPackage } | null>(null);
+  // Exam Taking Runner State: Pulihkan dari sessionStorage jika siswa me-refresh halaman saat ujian berlangsung
+  const [runningExam, setRunningExam] = useState<{ exam: Exam; pkg: QuestionPackage } | null>(() => {
+    try {
+      const savedSession = sessionStorage.getItem('voc_active_exam_session');
+      if (savedSession) {
+        return JSON.parse(savedSession);
+      }
+    } catch {}
+    return null;
+  });
+
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Load persistent data from Backend Database
   useEffect(() => {
     async function loadBackendData() {
+      setIsInitialLoading(true);
+      setLoadError(null);
+
+      // 1. Verifikasi dan pulihkan auth token jika tersimpan di sesi browser
       try {
-        const res = await fetch('/api/bootstrap');
-        const json = await res.json();
+        const storedToken = getAuthToken();
+        if (storedToken) {
+          const tokenRes = await fetch('/api/auth/restore-token', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${storedToken}`
+            },
+            body: JSON.stringify({ token: storedToken })
+          });
+          const tokenJson = await tokenRes.json().catch(() => ({}));
+          if (tokenRes.ok && tokenJson.token) {
+            setAuthToken(tokenJson.token);
+            if (tokenJson.user) {
+              setCurrentUser(tokenJson.user);
+              try {
+                localStorage.setItem('voc_user', JSON.stringify(tokenJson.user));
+              } catch {}
+            }
+            console.log('[Frontend] Sesi autentikasi berhasil dipulihkan secara aman.');
+          } else {
+            // Sesi kedaluwarsa atau token tidak valid: hapus dari browser
+            setAuthToken(null);
+            setCurrentUser(null);
+            try {
+              localStorage.removeItem('voc_token');
+              localStorage.removeItem('voc_user');
+            } catch {}
+            console.warn('[Frontend] Sesi tersimpan tidak valid atau telah kedaluwarsa.');
+          }
+        }
+      } catch (tokenErr) {
+        console.warn('[Frontend] Gagal memeriksa pemulihan auth token:', tokenErr);
+      }
+
+      // 2. Ambil data bootstrap dari backend
+      try {
+        const json = await apiGet('/api/bootstrap');
         if (json.success && json.data) {
           const { users, schools: s, classes: c, teachers: t, packages: p, exams: e, submissions: sub, archives: a, settings: set, portfolios: port } = json.data;
           if (Array.isArray(s)) setSchools(s);
@@ -294,8 +331,18 @@ export default function App() {
               localStorage.setItem('voc_teachers', JSON.stringify(t));
             } catch {}
           }
-          if (Array.isArray(p)) setPackages(p);
-          if (Array.isArray(e)) setExams(e);
+          if (Array.isArray(p)) {
+            setPackages(p);
+            try {
+              localStorage.setItem('voc_packages', JSON.stringify(p));
+            } catch {}
+          }
+          if (Array.isArray(e)) {
+            setExams(e);
+            try {
+              localStorage.setItem('voc_exams', JSON.stringify(e));
+            } catch {}
+          }
           if (Array.isArray(sub)) setSubmissions(sub);
           if (Array.isArray(a)) setArchives(a);
           if (set) setSettings(set);
@@ -334,9 +381,14 @@ export default function App() {
             });
           }
           console.log('[Frontend] Data berhasil disinkronkan dari database backend.');
+        } else {
+          setLoadError(json.error || 'Gagal memuat data dari database.');
         }
-      } catch (err) {
-        console.warn('[Frontend] Gagal terhubung ke backend bootstrap, menggunakan data lokal:', err);
+      } catch (err: any) {
+        console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
+        setLoadError('Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
+      } finally {
+        setIsInitialLoading(false);
       }
     }
     loadBackendData();
@@ -352,9 +404,11 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    clearAuthToken();
     setCurrentUser(null);
     try {
       localStorage.removeItem('voc_user');
+      sessionStorage.removeItem('voc_active_exam_session');
     } catch {}
     setRunningExam(null);
   };
@@ -556,24 +610,32 @@ export default function App() {
 
   // CRUD - Packages
   const handleAddPackage = async (newPkg: QuestionPackage) => {
-    setPackages(prev => [...prev, newPkg]);
+    setPackages(prev => {
+      const updated = [...prev.filter(p => p.id !== newPkg.id), newPkg];
+      try {
+        localStorage.setItem('voc_packages', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     try {
-      await fetch('/api/packages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newPkg)
-      });
-    } catch (e) { console.error(e); }
+      await apiPost('/api/packages', newPkg);
+    } catch (e) {
+      console.error('[App] Gagal menyimpan paket baru ke server:', e);
+    }
   };
   const handleUpdatePackage = async (updatedPkg: QuestionPackage) => {
-    setPackages(prev => prev.map(p => p.id === updatedPkg.id ? updatedPkg : p));
+    setPackages(prev => {
+      const updated = prev.map(p => p.id === updatedPkg.id ? updatedPkg : p);
+      try {
+        localStorage.setItem('voc_packages', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     try {
-      await fetch(`/api/packages/${updatedPkg.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedPkg)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut(`/api/packages/${updatedPkg.id}`, updatedPkg);
+    } catch (e) {
+      console.error('[App] Gagal memperbarui paket ke server:', e);
+    }
   };
   const handleDeletePackage = async (pkgId: string) => {
     const pkg = packages.find(p => p.id === pkgId);
@@ -589,38 +651,79 @@ export default function App() {
         ...prev
       ]);
     }
-    setPackages(prev => prev.filter(p => p.id !== pkgId));
+    setPackages(prev => {
+      const updated = prev.filter(p => p.id !== pkgId);
+      try {
+        localStorage.setItem('voc_packages', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     try {
-      await fetch(`/api/packages/${pkgId}`, { method: 'DELETE' });
-    } catch (e) { console.error(e); }
+      await apiDelete(`/api/packages/${pkgId}`);
+    } catch (e) {
+      console.error('[App] Gagal menghapus paket dari server:', e);
+    }
   };
 
   // CRUD - Exams
   const handleAddExam = async (newExam: Exam) => {
-    setExams(prev => [newExam, ...prev]);
+    // Pastikan snapshot butir soal disertakan dari paket jika belum ada
+    if (!newExam.questionSnapshot || newExam.questionSnapshot.length === 0) {
+      const selectedPkg = packages.find(p => p.id === newExam.packageId);
+      if (selectedPkg && Array.isArray(selectedPkg.questions)) {
+        newExam.questionSnapshot = JSON.parse(JSON.stringify(selectedPkg.questions));
+        newExam.packageTitle = selectedPkg.title;
+        newExam.category = selectedPkg.category;
+      }
+    }
+    setExams(prev => {
+      const updated = [newExam, ...prev.filter(e => e.id !== newExam.id)];
+      try {
+        localStorage.setItem('voc_exams', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     try {
-      await fetch('/api/exams', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newExam)
-      });
-    } catch (e) { console.error(e); }
+      await apiPost('/api/exams', newExam);
+    } catch (e) {
+      console.error('[App] Gagal menjadwalkan ujian ke server:', e);
+    }
   };
   const handleUpdateExam = async (updatedExam: Exam) => {
-    setExams(prev => prev.map(e => e.id === updatedExam.id ? updatedExam : e));
+    const selectedPkg = packages.find(p => p.id === updatedExam.packageId);
+    if (selectedPkg && Array.isArray(selectedPkg.questions)) {
+      updatedExam.packageTitle = selectedPkg.title;
+      updatedExam.category = selectedPkg.category;
+      if (!updatedExam.questionSnapshot || updatedExam.questionSnapshot.length === 0) {
+        updatedExam.questionSnapshot = JSON.parse(JSON.stringify(selectedPkg.questions));
+      }
+    }
+    setExams(prev => {
+      const updated = prev.map(e => e.id === updatedExam.id ? updatedExam : e);
+      try {
+        localStorage.setItem('voc_exams', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     try {
-      await fetch(`/api/exams/${updatedExam.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedExam)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut(`/api/exams/${updatedExam.id}`, updatedExam);
+    } catch (e) {
+      console.error('[App] Gagal memperbarui ujian ke server:', e);
+    }
   };
   const handleDeleteExam = async (examId: string) => {
-    setExams(prev => prev.filter(e => e.id !== examId));
+    setExams(prev => {
+      const updated = prev.filter(e => e.id !== examId);
+      try {
+        localStorage.setItem('voc_exams', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     try {
-      await fetch(`/api/exams/${examId}`, { method: 'DELETE' });
-    } catch (e) { console.error(e); }
+      await apiDelete(`/api/exams/${examId}`);
+    } catch (e) {
+      console.error('[App] Gagal menghapus ujian dari server:', e);
+    }
   };
 
   // Submissions
@@ -680,39 +783,110 @@ export default function App() {
     return false;
   };
 
-  const handleStartExam = (exam: Exam) => {
-    let pkg = packages.find(p => p.id === exam.packageId) || packages[0];
-    if (exam.packageId === 'pkg-full-24' || exam.category === 'teknis_kimia' || pkg?.category === 'teknis_kimia') {
-      pkg = {
-        ...pkg,
-        questions: REVISED_QUESTIONS_24
+  const handleStartExam = async (exam: Exam) => {
+    try {
+      // 1. Ambil butir soal terverifikasi langsung dari backend endpoint resolver
+      let resolvedQuestions: QuestionItem[] = [];
+      let resolvedPackage: QuestionPackage | undefined;
+
+      try {
+        const res = await apiGet<{
+          success: boolean;
+          examId: string;
+          packageId: string;
+          packageTitle: string;
+          questions: QuestionItem[];
+          packageObj?: QuestionPackage;
+        }>(`/api/exams/${exam.id}/questions`);
+
+        if (res && res.success && Array.isArray(res.questions) && res.questions.length > 0) {
+          resolvedQuestions = res.questions;
+          resolvedPackage = res.packageObj || packages.find(p => p.id === exam.packageId);
+        }
+      } catch (apiErr: any) {
+        console.warn('[handleStartExam] Backend resolver warning, falling back to local snapshot:', apiErr);
+      }
+
+      // 2. Jika offline atau resolver jaringan gagal, gunakan snapshot ujian atau paket lokal
+      if (resolvedQuestions.length === 0) {
+        if (Array.isArray(exam.questionSnapshot) && exam.questionSnapshot.length > 0) {
+          resolvedQuestions = exam.questionSnapshot;
+        } else {
+          const localPkg = packages.find(p => p.id === exam.packageId);
+          if (localPkg && Array.isArray(localPkg.questions) && localPkg.questions.length > 0) {
+            resolvedQuestions = localPkg.questions;
+            resolvedPackage = localPkg;
+          }
+        }
+      }
+
+      // 3. Larangan keras: Jangan gunakan soal Kemampuan Teknis Kimia sebagai fallback!
+      // Jika paket atau daftar soal tidak valid, tampilkan pesan error yang jelas.
+      if (resolvedQuestions.length === 0) {
+        alert(`Gagal membuka ujian "${exam.title}": Paket soal "${exam.packageTitle || exam.packageId}" tidak ditemukan atau belum memiliki butir soal. Silakan hubungi guru pengawas.`);
+        return;
+      }
+
+      const activePkg: QuestionPackage = resolvedPackage || {
+        id: exam.packageId,
+        code: exam.packageId,
+        title: exam.packageTitle || 'Paket Ujian',
+        description: exam.title,
+        category: exam.category,
+        durationMinutes: exam.durationMinutes,
+        totalQuestions: resolvedQuestions.length,
+        questions: resolvedQuestions,
+        isActive: true,
+        createdAt: exam.scheduleDate,
+        createdBy: exam.teacherName
       };
+
+      const examWithSnapshot: Exam = {
+        ...exam,
+        questionSnapshot: resolvedQuestions
+      };
+
+      const sessionData = { exam: examWithSnapshot, pkg: { ...activePkg, questions: resolvedQuestions } };
+      try {
+        sessionStorage.setItem('voc_active_exam_session', JSON.stringify(sessionData));
+      } catch {}
+      setRunningExam(sessionData);
+    } catch (err: any) {
+      console.error('[handleStartExam] Error:', err);
+      alert(`Terjadi kesalahan saat memulai ujian: ${err.message || err}`);
     }
-    setRunningExam({ exam, pkg });
   };
 
   const handleSubmitExamRunner = async (newSubmission: ExamSubmission) => {
-    setSubmissions(prev => [newSubmission, ...prev]);
-
-    // Update completed student count in exam
-    setExams(prev => prev.map(e => {
-      if (e.id === newSubmission.examId) {
-        return { ...e, completedStudents: (e.completedStudents || 0) + 1 };
-      }
-      return e;
-    }));
-
     try {
-      await fetch('/api/submissions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSubmission)
-      });
-      console.log('[Frontend] Hasil ujian siswa berhasil disimpan permanen ke server database.');
-    } catch (e) { console.error(e); }
+      const res = await apiPost('/api/submissions', newSubmission);
+      if (!res || res.success === false) {
+        throw new Error(res?.error || 'Server menolak pengiriman ujian.');
+      }
 
-    setRunningExam(null);
-    setActiveTab('kesiapan_kerja'); // Navigate to readiness profile after completing
+      setSubmissions(prev => {
+        const filtered = prev.filter(s => s.id !== newSubmission.id);
+        return [newSubmission, ...filtered];
+      });
+
+      // Update completed student count in exam if not duplicate
+      setExams(prev => prev.map(e => {
+        if (e.id === newSubmission.examId) {
+          const alreadySubmitted = submissions.some(s => s.examId === e.id && s.studentId === newSubmission.studentId);
+          return { ...e, completedStudents: alreadySubmitted ? (e.completedStudents || 1) : ((e.completedStudents || 0) + 1) };
+        }
+        return e;
+      }));
+
+      try {
+        sessionStorage.removeItem('voc_active_exam_session');
+      } catch {}
+      setRunningExam(null);
+      setActiveTab('kesiapan_kerja');
+    } catch (err: any) {
+      console.error('[Frontend] Submit exam failed:', err);
+      throw err;
+    }
   };
 
   const handleUpdateSettings = async (newSettings: SystemSettings) => {
@@ -760,6 +934,42 @@ export default function App() {
     }
   };
 
+  // Loading screen saat sinkronisasi data awal
+  if (isInitialLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-slate-100 font-sans">
+        <div className="w-14 h-14 rounded-2xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center mb-4 shadow-xl">
+          <div className="w-7 h-7 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+        <h2 className="text-lg font-bold text-white mb-1">Memuat EmployaSkills</h2>
+        <p className="text-xs text-slate-400">Sinkronisasi data asesmen dan profil kesiapan kerja...</p>
+      </div>
+    );
+  }
+
+  // Load error screen jika data sama sekali kosong dan koneksi terputus
+  if (loadError && !schools.length && !exams.length && !currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-slate-100 font-sans">
+        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
+          <div className="w-12 h-12 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-white">Gagal Menghubungkan ke Server</h2>
+            <p className="text-xs text-slate-400 mt-1 leading-relaxed">{loadError}</p>
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition cursor-pointer shadow-lg shadow-blue-600/30"
+          >
+            Muat Ulang Halaman
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // If user is not logged in, show AuthModal
   if (!currentUser) {
     return (
@@ -787,7 +997,12 @@ export default function App() {
         schoolName={currentUser.schoolName}
         className={currentUser.className || 'XII Kimia Analitik 1'}
         onSubmitExam={handleSubmitExamRunner}
-        onCancelExam={() => setRunningExam(null)}
+        onCancelExam={() => {
+          try {
+            sessionStorage.removeItem('voc_active_exam_session');
+          } catch {}
+          setRunningExam(null);
+        }}
       />
     );
   }

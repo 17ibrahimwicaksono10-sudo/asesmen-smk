@@ -68,6 +68,7 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
   // Preview Modal State
   const [previewEvidence, setPreviewEvidence] = useState<MultimodalEvidence | null>(null);
   const [isProcessingAI, setIsProcessingAI] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Audio recording timer
   useEffect(() => {
@@ -119,9 +120,8 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
             const clean = recognized.trim();
             currentTranscript = clean;
             setLiveTranscript(clean);
-            if (onTextTranscribed && clean) {
-              onTextTranscribed(clean);
-            }
+            // CATATAN: onTextTranscribed TIDAK dipanggil di sini agar kotak esai tidak terpolusi
+            // transkripsi sementara. Siswa menggunakan tombol "Salin ke Kotak Esai" secara eksplisit.
           };
 
           recognizer.onerror = (err: any) => {
@@ -266,7 +266,7 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
           const merged: MultimodalEvidence = {
             ...newEvidence,
             ...persisted,
-            fileData: newEvidence.fileData || persisted.fileData,
+            fileData: undefined, // Hapus Base64 dari memori & draft agar tidak membebani localStorage
             previewUrl: persisted.storageUrl || newEvidence.previewUrl,
             storageUrl: persisted.storageUrl,
             fileHash: persisted.fileHash || newEvidence.fileHash,
@@ -742,8 +742,34 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
 
                 {/* Player Audio embedded preview */}
                 {ev.modalityType === 'audio' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
-                  <div className="mt-2.5 pt-2 border-t border-slate-700/50">
-                    <audio controls src={ev.storageUrl || ev.fileData || ev.previewUrl} className="w-full h-8 rounded" />
+                  <div className="mt-2.5 pt-2 border-t border-slate-700/50 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
+                        <Volume2 className="w-3.5 h-3.5" />
+                        Rekaman Audio Bukti Siswa
+                      </span>
+                      {ev.audioDurationSeconds !== undefined && ev.audioDurationSeconds > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-emerald-400 font-bold">
+                          Durasi: {Math.floor(ev.audioDurationSeconds / 60)}:{(ev.audioDurationSeconds % 60).toString().padStart(2, '0')}
+                        </span>
+                      )}
+                    </div>
+                    <audio
+                      controls
+                      src={ev.storageUrl || ev.fileData || ev.previewUrl}
+                      className="w-full h-8 rounded"
+                      preload="metadata"
+                      onLoadedMetadata={(e) => {
+                        const el = e.currentTarget;
+                        if (el.duration === Infinity || isNaN(el.duration) || el.duration === 0) {
+                          el.currentTime = 1e101;
+                          el.ontimeupdate = () => {
+                            el.ontimeupdate = null;
+                            el.currentTime = 0;
+                          };
+                        }
+                      }}
+                    />
                   </div>
                 )}
 
@@ -772,13 +798,24 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
                         Teks Terdeteksi ({ev.modalityType === 'audio' ? 'Speech-to-Text' : 'Isi Dokumen'}):
                       </span>
                       {onTextTranscribed && (
-                        <button
-                          type="button"
-                          onClick={() => onTextTranscribed(ev.extractedText!)}
-                          className="text-[10px] text-emerald-400 hover:text-emerald-300 font-semibold underline cursor-pointer"
-                        >
-                          Salin ke Kotak Esai
-                        </button>
+                        copiedId === ev.id ? (
+                          <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                            <Check className="w-3 h-3" /> Tersalin ke Kotak Esai
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onTextTranscribed(ev.extractedText!);
+                              setCopiedId(ev.id);
+                              setTimeout(() => setCopiedId(null), 2500);
+                            }}
+                            className="text-[10px] text-emerald-400 hover:text-emerald-300 font-semibold underline cursor-pointer"
+                            title="Salin transkripsi bersih ini ke kotak jawaban esai"
+                          >
+                            Salin ke Kotak Esai
+                          </button>
+                        )
                       )}
                     </div>
                     <p className="line-clamp-2 italic text-slate-300 font-sans">"{ev.extractedText}"</p>

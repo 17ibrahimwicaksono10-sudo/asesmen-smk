@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Exam, QuestionPackage, QuestionItem, StudentAnswer, ExamSubmission, MultimodalEvidence } from '../../types';
 import { calculateAssessmentScore, evaluateEssaySemantic, REVISED_QUESTIONS_24 } from '../../data/revisedQuestions';
 import { calculateEmployabilityScore, NON_TEST_QUESTIONS_18 } from '../../data/nonTestInstrument';
-import { Clock, CheckCircle2, AlertTriangle, ArrowLeft, ArrowRight, Send, Sparkles, ShieldAlert, BookOpen, Calculator, CheckSquare, Layers, Award, Info, Mic } from 'lucide-react';
+import { Clock, CheckCircle2, AlertTriangle, ArrowLeft, ArrowRight, Send, Sparkles, ShieldAlert, BookOpen, Calculator, CheckSquare, Layers, Award, Info, Mic, RefreshCw } from 'lucide-react';
 import { MultimodalUploader } from '../common/MultimodalUploader';
 
 interface ExamRunnerProps {
@@ -14,7 +14,7 @@ interface ExamRunnerProps {
   studentEmail?: string;
   schoolName?: string;
   className: string;
-  onSubmitExam: (submission: ExamSubmission) => void;
+  onSubmitExam: (submission: ExamSubmission) => Promise<void> | void;
   onCancelExam: () => void;
 }
 
@@ -38,7 +38,12 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
   // State Dikte Suara (Speech-to-Text) langsung ke kotak esai
   const [isDictating, setIsDictating] = useState(false);
   const [dictatingTarget, setDictatingTarget] = useState<string | null>(null);
+  const [dictationInterim, setDictationInterim] = useState<string>('');
   const speechRecognizerRef = useRef<any>(null);
+
+  // State Pengumpulan & Idempotency
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Restore remaining time from localStorage jika ada (mencegah reset timer saat refresh)
   const [timeLeftSeconds, setTimeLeftSeconds] = useState(() => {
@@ -71,16 +76,54 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
     return {};
   });
 
-  // Autosave jawaban siswa ke localStorage setiap kali ada perubahan
+  // Helper membersihkan data Base64 sebelum disimpan ke draft lokal (menghindari QuotaExceededError)
+  const cleanAnswersForDraft = (answers: Record<string, StudentAnswer>): Record<string, StudentAnswer> => {
+    const clean: Record<string, StudentAnswer> = {};
+    for (const [k, v] of Object.entries(answers)) {
+      const evs = (v.multimodalEvidences || []).map(e => {
+        const { fileData, ...safe } = e;
+        return safe;
+      });
+      clean[k] = { ...v, multimodalEvidences: evs };
+    }
+    return clean;
+  };
+
+  // Autosave jawaban siswa ke localStorage setiap kali ada perubahan (ringan, tanpa Base64)
   useEffect(() => {
     if (Object.keys(answersState).length > 0) {
       try {
-        localStorage.setItem(draftStorageKey, JSON.stringify(answersState));
+        const safeDraft = cleanAnswersForDraft(answersState);
+        localStorage.setItem(draftStorageKey, JSON.stringify(safeDraft));
       } catch (err) {
         console.warn('[ExamRunner] Gagal menyimpan draft lokal:', err);
       }
     }
   }, [answersState, draftStorageKey]);
+
+  // Autosave berkala ke server backend (/api/exams/:id/draft) untuk ketahanan ekstra
+  useEffect(() => {
+    if (Object.keys(answersState).length === 0) return;
+    const syncTimer = setTimeout(async () => {
+      try {
+        const safeDraft = cleanAnswersForDraft(answersState);
+        await fetch(`/api/exams/${exam.id}/draft`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            studentId,
+            studentNis,
+            answers: safeDraft,
+            currentQuestionIndex,
+          })
+        });
+      } catch (err) {
+        // Background sync error does not disrupt student
+      }
+    }, 1500);
+
+    return () => clearTimeout(syncTimer);
+  }, [answersState, currentQuestionIndex, exam.id, studentId, studentNis]);
 
   // Simpan sisa waktu setiap 5 detik agar akurat
   useEffect(() => {
@@ -103,17 +146,15 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
     return () => clearInterval(interval);
   }, [timeLeftSeconds]);
 
-  // Pastikan instrumen teknis kimia selalu menggunakan butir instrumen REVISED_QUESTIONS_24 mutakhir (24 butir, 65 skor mentah)
+  // Dapatkan butir soal aktif strictly dari snapshot ujian atau paket soal yang dipilih
   const activeQuestions: QuestionItem[] = React.useMemo(() => {
-    const isTech = packageObj?.id === 'pkg-full-24' ||
-                   packageObj?.category === 'teknis_kimia' ||
-                   exam?.category === 'teknis_kimia' ||
-                   exam?.packageId === 'pkg-full-24' ||
-                   (packageObj?.questions && packageObj.questions.length === 24);
-    if (isTech) {
-      return REVISED_QUESTIONS_24;
+    if (Array.isArray(exam?.questionSnapshot) && exam.questionSnapshot.length > 0) {
+      return exam.questionSnapshot;
     }
-    return packageObj?.questions || REVISED_QUESTIONS_24;
+    if (Array.isArray(packageObj?.questions) && packageObj.questions.length > 0) {
+      return packageObj.questions;
+    }
+    return [];
   }, [packageObj, exam]);
 
   // Randomize / shuffle question order if exam.randomizeQuestions is true (or default true)
@@ -297,30 +338,37 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       recognizer.onstart = () => {
         setIsDictating(true);
         setDictatingTarget(target);
+        setDictationInterim('');
       };
 
       recognizer.onresult = (event: any) => {
-        let transcript = '';
+        let interim = '';
+        let finalChunk = '';
+
         for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const piece = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            transcript += event.results[i][0].transcript + ' ';
+            finalChunk += piece + ' ';
+          } else {
+            interim += piece;
           }
         }
-        if (transcript.trim()) {
-          const textToAdd = transcript.trim();
-          if (target === 'essay') {
-            setAnswersState(prev => {
-              const cur = prev[currentQuestion.id]?.essayAnswer || '';
-              const next = cur ? `${cur} ${textToAdd}` : textToAdd;
-              return {
-                ...prev,
-                [currentQuestion.id]: {
-                  ...(prev[currentQuestion.id] || { questionId: currentQuestion.id }),
-                  essayAnswer: next
-                }
-              };
-            });
-          }
+
+        setDictationInterim(interim.trim());
+
+        if (finalChunk.trim() && target === 'essay') {
+          const textToAdd = finalChunk.trim();
+          setAnswersState(prev => {
+            const cur = prev[currentQuestion.id]?.essayAnswer || '';
+            const next = cur.trim() ? `${cur.trim()} ${textToAdd}` : textToAdd;
+            return {
+              ...prev,
+              [currentQuestion.id]: {
+                ...(prev[currentQuestion.id] || { questionId: currentQuestion.id }),
+                essayAnswer: next
+              }
+            };
+          });
         }
       };
 
@@ -329,12 +377,14 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         if (e.error !== 'no-speech') {
           setIsDictating(false);
           setDictatingTarget(null);
+          setDictationInterim('');
         }
       };
 
       recognizer.onend = () => {
         setIsDictating(false);
         setDictatingTarget(null);
+        setDictationInterim('');
       };
 
       recognizer.start();
@@ -343,6 +393,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       console.warn('Gagal memulai speech recognition:', err);
       setIsDictating(false);
       setDictatingTarget(null);
+      setDictationInterim('');
     }
   };
 
@@ -353,6 +404,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
     }
     setIsDictating(false);
     setDictatingTarget(null);
+    setDictationInterim('');
   };
 
   useEffect(() => {
@@ -363,7 +415,11 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
     };
   }, []);
 
-  const handleFinalSubmit = () => {
+  const handleFinalSubmit = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+
     const isEmployabilityExam = 
       packageObj?.category === 'employability' ||
       packageObj?.id === 'pkg-employability-18' ||
@@ -451,7 +507,8 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       } else if (q.type === 'short_answer') {
         const val = (qAns.shortAnswerText || '').toString().trim().replace(',', '.');
         const calc = (qAns.shortAnswerCalculation || '').toString().toLowerCase();
-        if (q.number === 10) {
+        const isTechChemistry = (packageObj?.id === 'pkg-full-24' || packageObj?.id === 'pkg-teknis-kimia-24') && (q.id.startsWith('q-tk-') || q.id.startsWith('q-'));
+        if (isTechChemistry && q.number === 10) {
           // Soal 10 (Skor maks 3)
           let s1 = (calc.includes('n1') || calc.includes('v1') || calc.includes('pengenceran') || calc.includes('m1')) ? 1 : 0;
           let s2 = (calc.includes('1,00') || calc.includes('1.00') || calc.includes('1.0') || calc.includes('1,0')) &&
@@ -459,14 +516,14 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           let s3 = (val === '25' || val === '25.0' || Math.abs(parseFloat(val) - 25.0) < 0.1) ? 1 : 0;
           earnedScore = s1 + s2 + s3;
           if (earnedScore === 0 && (val || calc)) earnedScore = 1;
-        } else if (q.number === 11) {
+        } else if (isTechChemistry && q.number === 11) {
           // Soal 11 (Skor maks 3)
           let s1 = (calc.includes('2.00') || calc.includes('2,00') || calc.includes('2.0') || calc.includes('2,0') || calc.includes('0.05') || calc.includes('40')) ? 1 : 0;
           let s2 = (calc.includes('0.800') || calc.includes('0,800') || calc.includes('0.8') || calc.includes('0,8') || calc.includes('80%') || calc.includes('80')) ? 1 : 0;
           let s3 = (val === '2.5' || val === '2.50' || Math.abs(parseFloat(val) - 2.50) < 0.1) ? 1 : 0;
           earnedScore = s1 + s2 + s3;
           if (earnedScore === 0 && (val || calc)) earnedScore = 1;
-        } else if (q.number === 14) {
+        } else if (isTechChemistry && q.number === 14) {
           // Soal 14 (Skor maks 5)
           const fullText = `${val} ${calc} ${(qAns.subQuestionAnswers?.['kadar'] || '')}`;
           let s1 = (fullText.includes('6.2') || fullText.includes('6,2') || fullText.includes('0.0124') || fullText.includes('12.4') || fullText.includes('0.62')) ? 1 : 0;
@@ -477,7 +534,13 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           earnedScore = s1 + s2 + s3 + s4 + s5;
           if (earnedScore === 0 && (val || calc)) earnedScore = 1;
         } else {
-          earnedScore = (val === q.shortAnswerKey) ? qMax : 1;
+          if (!val && !calc) {
+            earnedScore = 0;
+          } else if (q.shortAnswerKey && (val.toLowerCase() === q.shortAnswerKey.toLowerCase() || (q.shortAnswerKey2 && val.toLowerCase() === q.shortAnswerKey2.toLowerCase()))) {
+            earnedScore = qMax;
+          } else {
+            earnedScore = (val || calc) ? Math.max(1, Math.round(qMax * 0.3)) : 0;
+          }
         }
       } else if (q.type === 'essay') {
         const textToEval = (qAns.essayAnswer || '').trim();
@@ -490,7 +553,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         const effectiveText = textToEval || evidenceText;
 
         if (effectiveText) {
-          earnedScore = qAns.score !== undefined ? qAns.score : evaluateEssaySemantic(q.number || 0, effectiveText);
+          const isTechChemistry = (packageObj?.id === 'pkg-full-24' || packageObj?.id === 'pkg-teknis-kimia-24') && (q.id.startsWith('q-tk-') || q.id.startsWith('q-'));
+          earnedScore = qAns.score !== undefined
+            ? qAns.score
+            : (isTechChemistry ? evaluateEssaySemantic(q.number || 0, effectiveText) : Math.round(qMax * 0.75));
           if (!textToEval && evidenceText) {
             qAns.essayAnswer = evidenceText;
           }
@@ -534,11 +600,13 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
     const finalTechScore = isTechnicalExam ? scoreResult.finalPercentage : 0;
     const finalEmpScore = isEmployabilityExam ? (empResult ? empResult.finalPercentage : scoreResult.finalPercentage) : 0;
 
+    const finalStudentId = studentId || (studentNis ? `usr-std-${studentNis}` : `usr-std-${Date.now()}`);
+
     const submission: ExamSubmission = {
-      id: `sub-${Date.now()}`,
+      id: `sub-${exam.id}-${finalStudentId}`,
       examId: exam.id,
       examTitle: exam.title,
-      studentId: studentId || (studentNis ? `usr-std-${studentNis}` : `usr-std-${Date.now()}`),
+      studentId: finalStudentId,
       studentName,
       studentNis,
       studentEmail,
@@ -562,13 +630,21 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           : `Pemeriksaan instrumen non-tes employability telah selesai sesuai rubrik 18 butir (1-5 per respons). Kategori: ${empResult?.category || 'Sangat baik'}.`
     };
 
-    // Bersihkan draft ujian setelah berhasil dikumpulkan
     try {
-      localStorage.removeItem(draftStorageKey);
-      localStorage.removeItem(timeStorageKey);
-    } catch {}
-
-    onSubmitExam(submission);
+      await onSubmitExam(submission);
+      // Bersihkan draft ujian setelah berhasil dikumpulkan
+      try {
+        localStorage.removeItem(draftStorageKey);
+        localStorage.removeItem(timeStorageKey);
+        sessionStorage.removeItem('voc_active_exam_session');
+      } catch {}
+      setShowConfirmSubmitModal(false);
+    } catch (err: any) {
+      console.error('Submit exam error:', err);
+      setSubmitError(err?.message || 'Gagal mengirimkan ujian ke server. Silakan periksa koneksi internet Anda dan coba lagi.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const formatTime = (totalSeconds: number) => {
@@ -576,6 +652,28 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
     const secs = totalSeconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+
+  if (activeQuestions.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-slate-900 border border-red-500/30 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
+          <div className="w-12 h-12 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center mx-auto">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <h2 className="text-lg font-bold text-white">Paket Soal Tidak Ditemukan</h2>
+          <p className="text-sm text-slate-400">
+            Jadwal ujian &ldquo;{exam?.title}&rdquo; merujuk pada paket &ldquo;{exam?.packageTitle || exam?.packageId}&rdquo;, namun daftar butir soal tidak ditemukan atau belum memiliki butir soal aktif.
+          </p>
+          <button
+            onClick={onCancelExam}
+            className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+          >
+            Kembali ke Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -782,7 +880,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           {currentQuestion.type === 'complex_mcq' && (() => {
             const complexOptions = (currentQuestion.options && currentQuestion.options.length > 0)
               ? currentQuestion.options
-              : (REVISED_QUESTIONS_24.find(q => q.id === currentQuestion.id)?.options || []);
+              : (activeQuestions.find(q => q.id === currentQuestion.id)?.options || []);
 
             const pickedList = answersState[currentQuestion.id]?.selectedOptions || [];
             const pickedCount = pickedList.length;
@@ -855,10 +953,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           {currentQuestion.type === 'matching' && (() => {
             const colA = (currentQuestion.matchingColumnA && currentQuestion.matchingColumnA.length > 0)
               ? currentQuestion.matchingColumnA
-              : (REVISED_QUESTIONS_24.find(q => q.id === currentQuestion.id)?.matchingColumnA || []);
+              : (activeQuestions.find(q => q.id === currentQuestion.id)?.matchingColumnA || []);
             const colB = (currentQuestion.matchingColumnB && currentQuestion.matchingColumnB.length > 0)
               ? currentQuestion.matchingColumnB
-              : (REVISED_QUESTIONS_24.find(q => q.id === currentQuestion.id)?.matchingColumnB || []);
+              : (activeQuestions.find(q => q.id === currentQuestion.id)?.matchingColumnB || []);
             const matchingAns = answersState[currentQuestion.id]?.matchingAnswers || {};
 
             return (
@@ -1068,9 +1166,17 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
               </div>
 
               {isDictating && dictatingTarget === 'essay' && (
-                <div className="p-2.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 animate-spin text-emerald-400 shrink-0" />
-                  <span>Silakan berbicara dalam Bahasa Indonesia. Ucapan Anda langsung diketik ke dalam kotak teks di bawah secara otomatis.</span>
+                <div className="p-2.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 animate-spin text-emerald-400 shrink-0" />
+                    <span>Silakan berbicara dalam Bahasa Indonesia. Ucapan Anda langsung diketik setelah jeda jeda berbicara.</span>
+                  </div>
+                  {dictationInterim && (
+                    <div className="mt-1 p-2 bg-emerald-900/40 rounded-lg text-emerald-200 italic font-mono text-[11px] border border-emerald-700/50">
+                      <span className="font-semibold text-emerald-400 not-italic mr-1.5">Mendengar sementara:</span>
+                      "{dictationInterim}"
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1122,12 +1228,17 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
               examId={exam.id}
               evidences={answersState[currentQuestion.id]?.multimodalEvidences || []}
               onTextTranscribed={(transcribedText) => {
+                if (!transcribedText || !transcribedText.trim()) return;
+                const clean = transcribedText.trim();
                 setAnswersState((prev) => {
                   const existing = prev[currentQuestion.id] || { questionId: currentQuestion.id };
                   const currentEssay = existing.essayAnswer || '';
+                  if (currentEssay.toLowerCase().includes(clean.toLowerCase())) {
+                    return prev;
+                  }
                   const nextEssay = currentEssay
-                    ? (currentEssay.includes(transcribedText) ? currentEssay : `${currentEssay}\n${transcribedText}`)
-                    : transcribedText;
+                    ? `${currentEssay}\n\n${clean}`
+                    : clean;
                   return {
                     ...prev,
                     [currentQuestion.id]: {
@@ -1189,9 +1300,20 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
             <div className="flex items-center gap-3 text-emerald-400">
-              <ShieldAlert className="w-8 h-8" />
+              <ShieldAlert className="w-8 h-8 shrink-0" />
               <h3 className="text-base font-bold text-white">Konfirmasi Pengiriman Ujian</h3>
             </div>
+
+            {submitError && (
+              <div className="p-3 rounded-xl bg-rose-950/80 border border-rose-500/50 text-rose-200 text-xs flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold text-rose-300">Pengiriman Gagal</p>
+                  <p className="mt-0.5">{submitError}</p>
+                  <p className="text-[11px] text-rose-300/80 mt-1">Jawaban Anda tersimpan dengan aman di penyimpanan lokal. Silakan coba kirim ulang.</p>
+                </div>
+              </div>
+            )}
 
             <p className="text-xs text-slate-300 leading-relaxed">
               Apakah Anda yakin ingin menyelesaikan dan mengirimkan jawaban instrumen tes teknis kimia ini? Sistem akan menghitung skor otomatis per dimensi kompetensi.
@@ -1199,16 +1321,28 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
             <div className="flex justify-end gap-2 pt-2">
               <button
-                onClick={() => setShowConfirmSubmitModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold cursor-pointer"
+                disabled={isSubmitting}
+                onClick={() => {
+                  setSubmitError(null);
+                  setShowConfirmSubmitModal(false);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-xs font-semibold cursor-pointer"
               >
                 Periksa Lagi
               </button>
               <button
+                disabled={isSubmitting}
                 onClick={handleFinalSubmit}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold cursor-pointer flex items-center gap-2 shadow-lg shadow-emerald-600/30"
               >
-                Ya, Kirim Sekarang
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Sedang Mengirim...</span>
+                  </>
+                ) : (
+                  <span>Ya, Kirim Sekarang</span>
+                )}
               </button>
             </div>
           </div>

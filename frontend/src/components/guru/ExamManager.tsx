@@ -190,16 +190,26 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
     }
 
     const pkgObj = packages.find(p => p.id === packageId);
+    if (!pkgObj) {
+      setFormError('Paket soal yang dipilih tidak valid atau belum tersedia. Silakan pilih paket soal yang valid.');
+      return;
+    }
+
     const classObj = classes.find(c => c.id === classId);
     const schoolObj = schoolsList.find(s => s.id === modalSchoolId);
 
     if (editingExam) {
+      const packageChanged = editingExam.packageId !== packageId;
       onUpdateExam({
         ...editingExam,
         title: title.trim(),
         packageId,
-        packageTitle: pkgObj?.title || editingExam.packageTitle,
-        category: pkgObj?.category || editingExam.category,
+        packageTitle: pkgObj.title,
+        packageVersion: pkgObj.version || 1,
+        questionSnapshot: (packageChanged && Array.isArray(pkgObj.questions))
+          ? JSON.parse(JSON.stringify(pkgObj.questions))
+          : (editingExam.questionSnapshot || (Array.isArray(pkgObj.questions) ? JSON.parse(JSON.stringify(pkgObj.questions)) : [])),
+        category: pkgObj.category,
         classId,
         className: classObj?.name || editingExam.className,
         schoolId: modalSchoolId,
@@ -217,8 +227,10 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
         id: `ex-${Date.now()}`,
         title: title.trim(),
         packageId,
-        packageTitle: pkgObj?.title || 'Paket Asesmen Teknis Kimia',
-        category: pkgObj?.category || 'teknis_kimia',
+        packageTitle: pkgObj.title,
+        packageVersion: pkgObj.version || 1,
+        questionSnapshot: Array.isArray(pkgObj.questions) ? JSON.parse(JSON.stringify(pkgObj.questions)) : [],
+        category: pkgObj.category,
         classId,
         className: classObj?.name || 'XII Kimia Analitik 1',
         schoolId: modalSchoolId,
@@ -228,7 +240,7 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
         scheduleDate,
         startTime,
         endTime,
-        durationMinutes,
+        durationMinutes: durationMinutes || pkgObj.durationMinutes || 60,
         targetScore,
         status,
         randomizeQuestions,
@@ -248,8 +260,8 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
     // Cari siswa yang terdaftar di kelas dan sekolah ujian ini
     const classStudents = students.filter(st => 
       st.role === 'siswa' && 
-      (st.classId === exam.classId || (st.className && st.className.toLowerCase() === exam.className.toLowerCase())) &&
-      (!exam.schoolId || st.schoolId === exam.schoolId || (st.schoolName && exam.schoolName && st.schoolName.toLowerCase() === exam.schoolName.toLowerCase()))
+      (!exam.classId || st.classId === exam.classId || (Boolean(st.className) && Boolean(exam.className) && st.className.toLowerCase() === exam.className.toLowerCase())) &&
+      (!exam.schoolId || st.schoolId === exam.schoolId || (Boolean(st.schoolName) && Boolean(exam.schoolName) && st.schoolName.toLowerCase() === exam.schoolName.toLowerCase()))
     );
 
     // Fallback sampel siswa jika belum ada siswa terdaftar agar visualisasi pengawasan selalu valid
@@ -424,12 +436,21 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
 
   // Filter exams by School, Class, Status, and Search
   const filteredExams = exams.filter(ex => {
-    const matchSchool = selectedSchoolFilter === 'ALL' || ex.schoolId === selectedSchoolFilter || (ex.schoolName && schoolsList.find(s => s.id === selectedSchoolFilter)?.name && ex.schoolName.toLowerCase() === schoolsList.find(s => s.id === selectedSchoolFilter)?.name.toLowerCase());
-    const matchClass = selectedClassFilter === 'ALL' || ex.classId === selectedClassFilter || (ex.className && classes.find(c => c.id === selectedClassFilter)?.name && ex.className.toLowerCase() === classes.find(c => c.id === selectedClassFilter)?.name.toLowerCase());
+    const selectedSchoolObj = schoolsList.find(s => s.id === selectedSchoolFilter);
+    const matchSchool = selectedSchoolFilter === 'ALL' || 
+      ex.schoolId === selectedSchoolFilter || 
+      (Boolean(ex.schoolName) && Boolean(selectedSchoolObj?.name) && ex.schoolName.toLowerCase() === selectedSchoolObj?.name.toLowerCase());
+
+    const selectedClassObj = classes.find(c => c.id === selectedClassFilter);
+    const matchClass = selectedClassFilter === 'ALL' || 
+      ex.classId === selectedClassFilter || 
+      (Boolean(ex.className) && Boolean(selectedClassObj?.name) && ex.className.toLowerCase() === selectedClassObj?.name.toLowerCase());
+
     const matchStatus = filterStatus === 'ALL' || ex.status === filterStatus;
-    const matchSearch = ex.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      ex.className.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      ex.packageTitle.toLowerCase().includes(searchQuery.toLowerCase());
+    const qLower = (searchQuery || '').toLowerCase();
+    const matchSearch = (ex.title || '').toLowerCase().includes(qLower) ||
+      (ex.className || '').toLowerCase().includes(qLower) ||
+      (ex.packageTitle || '').toLowerCase().includes(qLower);
     
     return matchSchool && matchClass && matchStatus && matchSearch;
   });

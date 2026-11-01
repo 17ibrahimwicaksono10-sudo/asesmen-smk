@@ -6,6 +6,7 @@ dist/
 coverage/
 *.log
 .DS_Store
+
 # API keys and runtime secrets
 .env
 .env.*
@@ -13,10 +14,26 @@ coverage/
 **/.env.*
 !**/.env.example
 !.env.example
-# Private student assessments, audio recordings, images, and backups
-/backend/data/
-/backend/data/**
-# Local development artifacts
+.auth_secret
+**/.auth_secret
+
+# Private student assessments, audio recordings, images, backups, and data stores
+backend/data/
+backend/data/**
+**/backend/data/
+**/backend/data/**
+backend/backend/
+backend/backend/**
+**/backend/backend/
+**/backend/backend/**
+**/evidence_storage/
+**/evidence_storage/**
+**/*.backup.json
+
+# Temporary staging test databases & scratch artifacts
+**/staging_*/
+**/staging_*/**
+**/*.test.db.json
 /scratch/
 *.rar
 *.zip
