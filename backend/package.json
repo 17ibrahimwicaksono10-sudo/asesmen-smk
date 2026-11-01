@@ -10,6 +10,8 @@
     "migrate": "tsx src/migrate.ts",
     "migrate:passwords": "tsx src/migrate_passwords.ts",
     "rollback:evidence": "tsx src/rollback.ts",
+    "rollback:database": "tsx src/safe_rollback_database.ts",
+    "emergency:reset-password": "tsx src/emergency_reset_password.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -43,11 +43,42 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Backup persistent database on VPS
+      - name: Backup persistent database and code snapshot on VPS
         run: |
           set -euo pipefail
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ubuntu@43.173.6.6 \
-            'set -e; mkdir -p /home/ubuntu/asesmen-backups; if test -f /home/ubuntu/Prototype/backend/data/database.json; then cp /home/ubuntu/Prototype/backend/data/database.json "/home/ubuntu/asesmen-backups/database-$(date +%Y%m%d-%H%M%S).json"; fi; if test -f /home/ubuntu/Prototype/backend/data/.auth_secret; then cp /home/ubuntu/Prototype/backend/data/.auth_secret "/home/ubuntu/asesmen-backups/.auth_secret-$(date +%Y%m%d-%H%M%S)"; fi; find /home/ubuntu/asesmen-backups -maxdepth 1 -type f -name "database-*.json" -mtime +14 -delete'
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ubuntu@43.173.6.6 '
+            set -e
+            TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+            mkdir -p /home/ubuntu/asesmen-backups
+
+            # 1. Backup persistent database with SHA-256 checksum
+            if [ -f /home/ubuntu/Prototype/backend/data/database.json ]; then
+              DB_BACKUP="/home/ubuntu/asesmen-backups/database-${TIMESTAMP}.json"
+              cp /home/ubuntu/Prototype/backend/data/database.json "${DB_BACKUP}"
+              sha256sum "${DB_BACKUP}" > "${DB_BACKUP}.sha256"
+              echo "Database backup created: ${DB_BACKUP}"
+            fi
+            if [ -f /home/ubuntu/Prototype/backend/data/.auth_secret ]; then
+              cp /home/ubuntu/Prototype/backend/data/.auth_secret "/home/ubuntu/asesmen-backups/.auth_secret-${TIMESTAMP}"
+            fi
+
+            # 2. Snapshot current active code for reliable rollback (without touching git or database)
+            mkdir -p /home/ubuntu/asesmen-code-backups/previous_release
+            if [ -f /home/ubuntu/Prototype/compose.yaml ]; then
+              rsync -az --delete \
+                --exclude="/backend/data/***" \
+                --exclude="**/evidence_storage/***" \
+                --exclude="**/.auth_secret" \
+                --exclude="**/.env*" \
+                --exclude="**/node_modules/***" \
+                --exclude="**/dist/***" \
+                /home/ubuntu/Prototype/ /home/ubuntu/asesmen-code-backups/previous_release/
+              echo "Previous code snapshot saved to /home/ubuntu/asesmen-code-backups/previous_release/"
+            fi
+
+            # Clean database backups older than 14 days
+            find /home/ubuntu/asesmen-backups -maxdepth 1 -type f -name "database-*.json*" -mtime +14 -delete
+          '
 
       - name: Sync code (NEVER sync secrets or assessment data)
         run: |
