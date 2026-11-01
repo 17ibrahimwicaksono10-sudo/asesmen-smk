@@ -15,6 +15,8 @@ import {
   sanitizeSettings,
   generateAuthToken,
   verifyAuthToken,
+  hashPassword,
+  verifyPassword,
   AuthenticatedRequest,
 } from "./auth";
 import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
@@ -609,7 +611,7 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
     const existing = db.users.find((u) => u.email.toLowerCase() === cleanEmail);
     if (existing) {
       if (!existing.password) {
-        existing.password = userPassword;
+        existing.password = hashPassword(userPassword);
       }
       if (className && !existing.className) existing.className = className.trim();
       if (classId && !existing.classId) existing.classId = classId.trim();
@@ -622,7 +624,7 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
       id: `usr-reg-${Date.now()}`,
       name: name.trim(),
       email: cleanEmail,
-      password: userPassword,
+      password: hashPassword(userPassword),
       role: role || "siswa",
       identityNo: identityNo?.trim() || `NIS-${Date.now().toString().slice(-5)}`,
       schoolName: schoolName?.trim() || "SMK Mitra Industri",
@@ -675,11 +677,17 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
     return res.status(404).json({ success: false, error: "Akun belum terdaftar dalam sistem." });
   }
 
-  const expectedPassword = user.password;
-  const isValid = Boolean(expectedPassword && password === expectedPassword);
+  const isValid = verifyPassword(password, user.password);
 
   if (!isValid) {
     return res.status(401).json({ success: false, error: "Email atau password salah." });
+  }
+
+  // Auto-upgrade legacy plaintext password ke scrypt hash saat berhasil login
+  if (user.password && !user.password.startsWith("scrypt:")) {
+    user.password = hashPassword(password);
+    saveDb();
+    console.log(`[AUTH] Password akun ${user.email} otomatis dimigrasikan ke scrypt hash.`);
   }
 
   const token = generateAuthToken(user);
@@ -795,12 +803,13 @@ app.post("/api/auth/reset-password", requireAuth, (req: AuthenticatedRequest, re
       return res.status(403).json({ success: false, error: "Akses ditolak: Anda tidak memiliki wewenang mereset password akun ini." });
     }
 
-    user.password = cleanPass;
+    const hashedPassword = hashPassword(cleanPass);
+    user.password = hashedPassword;
 
     // Jika guru, sinkronkan juga ke db.teachers
     const teacherIdx = db.teachers.findIndex((t) => t.id === user.id || t.email.toLowerCase() === user.email.toLowerCase());
     if (teacherIdx >= 0) {
-      db.teachers[teacherIdx].password = cleanPass;
+      db.teachers[teacherIdx].password = hashedPassword;
     }
 
     saveDb();

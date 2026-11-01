@@ -53,6 +53,42 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
+ * Hash password using Node.js crypto.scryptSync with a unique cryptographically secure salt
+ */
+export function hashPassword(plainText: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedKey = crypto.scryptSync(plainText, salt, 64);
+  return `scrypt:${salt}:${derivedKey.toString('hex')}`;
+}
+
+/**
+ * Verify password against stored hash (scrypt) or legacy plaintext with timing attack protection
+ */
+export function verifyPassword(password: string, storedHashOrPlain?: string): boolean {
+  if (!storedHashOrPlain || !password) return false;
+
+  if (storedHashOrPlain.startsWith('scrypt:')) {
+    const parts = storedHashOrPlain.split(':');
+    if (parts.length !== 3) return false;
+    const salt = parts[1];
+    const key = parts[2];
+    try {
+      const derivedKey = crypto.scryptSync(password, salt, 64);
+      const keyBuf = Buffer.from(key, 'hex');
+      return keyBuf.length === derivedKey.length && crypto.timingSafeEqual(keyBuf, derivedKey);
+    } catch {
+      return false;
+    }
+  }
+
+  // Legacy plaintext fallback (safe string comparison to protect against timing attacks)
+  const passBuf = Buffer.from(password);
+  const storedBuf = Buffer.from(storedHashOrPlain);
+  if (passBuf.length !== storedBuf.length) return false;
+  return crypto.timingSafeEqual(passBuf, storedBuf);
+}
+
+/**
  * Generate a cryptographically signed HMAC-SHA256 token
  */
 export function generateAuthToken(user: User): string {
