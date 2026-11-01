@@ -14,6 +14,7 @@ import {
   sanitizeUser,
   sanitizeSettings,
   generateAuthToken,
+  verifyAuthToken,
   AuthenticatedRequest,
 } from "./auth";
 import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
@@ -475,8 +476,19 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
   // Sanitasi konfigurasi sistem: Hilangkan API keys Gemini & DeepSeek
   const safeSettings = sanitizeSettings(db.settings);
 
-  // Sanitasi daftar ujian (ringkas)
-  const safeExams = (db.exams || []).map(e => ({ ...e }));
+  const isTeacherOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'guru');
+
+  // Sanitasi daftar paket soal: Siswa & pengguna anonim TIDAK menerima correctAnswer, rubricGuide, dll
+  const safePackages = (db.packages || []).map(p => ({
+    ...p,
+    questions: isTeacherOrAdmin ? p.questions : sanitizeQuestionsForStudent(p.questions || [])
+  }));
+
+  // Sanitasi daftar ujian (ringkas): Sensor questionSnapshot untuk non-guru/admin
+  const safeExams = (db.exams || []).map(e => ({
+    ...e,
+    questionSnapshot: isTeacherOrAdmin ? e.questionSnapshot : (e.questionSnapshot ? sanitizeQuestionsForStudent(e.questionSnapshot) : undefined)
+  }));
 
   // Sanitasi submission: TIDAK MENGIRIMKAN Base64 dan jawaban berat di bootstrap
   // Sanitasi submission: Isolasi data berdasarkan hak akses (Anti-Bypass & Perlindungan Data Siswa)
@@ -544,7 +556,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       schools: db.schools || [],
       classes: db.classes || [],
       teachers: safeTeachers,
-      packages: db.packages || [],
+      packages: safePackages,
       exams: safeExams,
       submissions: safeSubmissions,
       archives: db.archives || [],
@@ -675,40 +687,78 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
 });
 
 app.post("/api/auth/restore-token", (req: Request, res: Response) => {
-  const { email, id } = req.body;
-  if (!email && !id) {
-    return res.status(400).json({ success: false, error: "Email atau user ID diperlukan." });
-  }
-
-  const db = getDb();
-  const cleanEmail = (email || "").trim().toLowerCase();
-  let user = db.users.find((u) => (id && u.id === id) || (cleanEmail && u.email.toLowerCase() === cleanEmail));
-
-  if (!user && cleanEmail) {
-    const teacher = db.teachers.find((t) => t.email.toLowerCase() === cleanEmail);
-    if (teacher) {
-      user = {
-        id: teacher.id,
-        name: teacher.name,
-        email: teacher.email,
-        role: "guru",
-        identityNo: teacher.identityNo,
-        schoolId: teacher.schoolId,
-        schoolName: teacher.schoolName,
-        phone: teacher.phone,
-        password: teacher.password || "123456",
-      };
-      db.users.push(user);
-      saveDb();
+  try {
+    // 1. Ekstrak token dari header Authorization atau request body
+    let token = "";
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.split(" ")[1];
+    } else if (req.body?.token && typeof req.body.token === "string") {
+      token = req.body.token.trim();
     }
-  }
 
-  if (!user) {
-    return res.status(404).json({ success: false, error: "Pengguna tidak ditemukan." });
-  }
+    // Pengguna anonim / tanpa token DITOLAK
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: "Akses ditolak: Token autentikasi atau sesi sah wajib disertakan untuk memulihkan sesi.",
+        code: "UNAUTHORIZED"
+      });
+    }
 
-  const token = generateAuthToken(user);
-  res.json({ success: true, user: sanitizeUser(user), token });
+    // 2. Verifikasi keaslian kriptografis HMAC-SHA256 & masa berlaku token
+    const payload = verifyAuthToken(token);
+    if (!payload) {
+      return res.status(401).json({
+        success: false,
+        error: "Akses ditolak: Sesi tidak valid, tanda tangan rusak/palsu, atau telah kedaluwarsa.",
+        code: "INVALID_OR_EXPIRED_TOKEN"
+      });
+    }
+
+    const db = getDb();
+    const user = db.users.find(u => u.id === payload.userId || u.email.toLowerCase() === payload.email.toLowerCase());
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "Pengguna pada sesi terverifikasi tidak ditemukan dalam basis data.",
+        code: "USER_NOT_FOUND"
+      });
+    }
+
+    // 3. Cegah percobaan pembajakan identitas pengguna lain (Identity Spoofing Block)
+    const requestedEmail = req.body?.email ? String(req.body.email).trim().toLowerCase() : "";
+    const requestedId = req.body?.id ? String(req.body.id).trim() : "";
+    if (requestedEmail && requestedEmail !== user.email.toLowerCase()) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Percobaan pemalsuan identitas pengguna lain terdeteksi.",
+        code: "IDENTITY_SPOOFING_FORBIDDEN"
+      });
+    }
+    if (requestedId && requestedId !== user.id) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Percobaan pemalsuan ID pengguna lain terdeteksi.",
+        code: "IDENTITY_SPOOFING_FORBIDDEN"
+      });
+    }
+
+    // 4. Terbitkan token baru yang diperbarui untuk pengguna terverifikasi tersebut
+    const refreshedToken = generateAuthToken(user);
+    return res.json({
+      success: true,
+      user: sanitizeUser(user),
+      token: refreshedToken,
+      message: "Sesi berhasil dipulihkan dan diperbarui secara aman."
+    });
+  } catch (err: any) {
+    return res.status(401).json({
+      success: false,
+      error: "Akses ditolak: Token tidak valid atau sesi gagal diverifikasi.",
+      code: "INVALID_OR_EXPIRED_TOKEN"
+    });
+  }
 });
 
 app.get("/api/auth/users", requireAuth, requireRole("admin", "guru"), (_req: AuthenticatedRequest, res: Response) => {
@@ -943,9 +993,14 @@ app.delete("/api/teachers/:id", requireAuth, requireRole("admin"), (req: Authent
 // -------------------------------------------------------------
 // CRUD - Question Packages (ADMIN & GURU)
 // -------------------------------------------------------------
-app.get("/api/packages", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get("/api/packages", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  res.json({ success: true, data: db.packages || [], packages: db.packages || [] });
+  const isTeacherOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'guru');
+  const safePackages = (db.packages || []).map(p => ({
+    ...p,
+    questions: isTeacherOrAdmin ? p.questions : sanitizeQuestionsForStudent(p.questions || [])
+  }));
+  res.json({ success: true, data: safePackages, packages: safePackages });
 });
 
 app.get("/api/packages/:id", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
@@ -955,7 +1010,12 @@ app.get("/api/packages/:id", optionalAuth, (req: AuthenticatedRequest, res: Resp
   if (!pkg) {
     return res.status(404).json({ success: false, error: `Paket soal dengan ID "${id}" tidak ditemukan.` });
   }
-  res.json({ success: true, data: pkg, package: pkg });
+  const isTeacherOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'guru');
+  const safePkg = {
+    ...pkg,
+    questions: isTeacherOrAdmin ? pkg.questions : sanitizeQuestionsForStudent(pkg.questions || [])
+  };
+  res.json({ success: true, data: safePkg, package: safePkg });
 });
 
 app.post("/api/packages", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
@@ -1376,9 +1436,9 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
   const startIdx = (p - 1) * l;
   const pagedItems = list.slice(startIdx, startIdx + l);
 
-  // Proyeksi ringan: hilangkan string Base64 & answers berat dari daftar
+  // Proyeksi ringan: hilangkan string Base64, answers berat, dan snapshot rahasia dari daftar
   const sanitizedList = pagedItems.map(s => {
-    const { answers, evidences, ...light } = s;
+    const { answers, evidences, questionSnapshot, ...light } = s;
     const cleanEvs = Array.isArray(evidences)
       ? evidences.map(ev => {
           const { fileData, ...clean } = ev;
@@ -1446,9 +1506,17 @@ app.get("/api/submissions/:id", requireAuth, (req: AuthenticatedRequest, res: Re
   // Bersihkan Base64 jika masih ada
   extractEvidenceBase64FromSubmission(sub);
 
+  const isTeacherOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'guru');
+  const safeSubmission = {
+    ...sub,
+    questionSnapshot: isTeacherOrAdmin
+      ? sub.questionSnapshot
+      : (sub.questionSnapshot ? sanitizeQuestionsForStudent(sub.questionSnapshot) : undefined)
+  };
+
   res.json({
     success: true,
-    submission: sub,
+    submission: safeSubmission,
   });
 });
 

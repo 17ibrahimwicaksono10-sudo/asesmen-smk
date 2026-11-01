@@ -96,7 +96,9 @@ export function verifyAuthToken(token: string): AuthPayload | null {
       .update(payloadBase64)
       .digest('base64url');
 
-    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
+    const sigBuf = Buffer.from(signature);
+    const expSigBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expSigBuf.length || !crypto.timingSafeEqual(sigBuf, expSigBuf)) {
       return null;
     }
 

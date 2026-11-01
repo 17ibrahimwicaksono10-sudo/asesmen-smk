@@ -281,23 +281,37 @@ export default function App() {
       setIsInitialLoading(true);
       setLoadError(null);
 
-      // 1. Pulihkan auth token secara otomatis jika session user tersimpan namun token kosong/expired
+      // 1. Verifikasi dan pulihkan auth token jika tersimpan di sesi browser
       try {
         const storedToken = getAuthToken();
-        const storedUser = localStorage.getItem('voc_user');
-        if (!storedToken && storedUser) {
-          const parsedUser = JSON.parse(storedUser);
-          if (parsedUser && (parsedUser.email || parsedUser.id)) {
-            const tokenRes = await fetch('/api/auth/restore-token', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: parsedUser.email, id: parsedUser.id })
-            });
-            const tokenJson = await tokenRes.json().catch(() => ({}));
-            if (tokenRes.ok && tokenJson.token) {
-              setAuthToken(tokenJson.token);
-              console.log('[Frontend] Auth token berhasil dipulihkan secara otomatis.');
+        if (storedToken) {
+          const tokenRes = await fetch('/api/auth/restore-token', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${storedToken}`
+            },
+            body: JSON.stringify({ token: storedToken })
+          });
+          const tokenJson = await tokenRes.json().catch(() => ({}));
+          if (tokenRes.ok && tokenJson.token) {
+            setAuthToken(tokenJson.token);
+            if (tokenJson.user) {
+              setCurrentUser(tokenJson.user);
+              try {
+                localStorage.setItem('voc_user', JSON.stringify(tokenJson.user));
+              } catch {}
             }
+            console.log('[Frontend] Sesi autentikasi berhasil dipulihkan secara aman.');
+          } else {
+            // Sesi kedaluwarsa atau token tidak valid: hapus dari browser
+            setAuthToken(null);
+            setCurrentUser(null);
+            try {
+              localStorage.removeItem('voc_token');
+              localStorage.removeItem('voc_user');
+            } catch {}
+            console.warn('[Frontend] Sesi tersimpan tidak valid atau telah kedaluwarsa.');
           }
         }
       } catch (tokenErr) {

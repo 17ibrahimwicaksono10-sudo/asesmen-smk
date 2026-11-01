@@ -260,8 +260,8 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
     // Cari siswa yang terdaftar di kelas dan sekolah ujian ini
     const classStudents = students.filter(st => 
       st.role === 'siswa' && 
-      (st.classId === exam.classId || (st.className && st.className.toLowerCase() === exam.className.toLowerCase())) &&
-      (!exam.schoolId || st.schoolId === exam.schoolId || (st.schoolName && exam.schoolName && st.schoolName.toLowerCase() === exam.schoolName.toLowerCase()))
+      (!exam.classId || st.classId === exam.classId || (Boolean(st.className) && Boolean(exam.className) && st.className.toLowerCase() === exam.className.toLowerCase())) &&
+      (!exam.schoolId || st.schoolId === exam.schoolId || (Boolean(st.schoolName) && Boolean(exam.schoolName) && st.schoolName.toLowerCase() === exam.schoolName.toLowerCase()))
     );
 
     // Fallback sampel siswa jika belum ada siswa terdaftar agar visualisasi pengawasan selalu valid
@@ -436,12 +436,21 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
 
   // Filter exams by School, Class, Status, and Search
   const filteredExams = exams.filter(ex => {
-    const matchSchool = selectedSchoolFilter === 'ALL' || ex.schoolId === selectedSchoolFilter || (ex.schoolName && schoolsList.find(s => s.id === selectedSchoolFilter)?.name && ex.schoolName.toLowerCase() === schoolsList.find(s => s.id === selectedSchoolFilter)?.name.toLowerCase());
-    const matchClass = selectedClassFilter === 'ALL' || ex.classId === selectedClassFilter || (ex.className && classes.find(c => c.id === selectedClassFilter)?.name && ex.className.toLowerCase() === classes.find(c => c.id === selectedClassFilter)?.name.toLowerCase());
+    const selectedSchoolObj = schoolsList.find(s => s.id === selectedSchoolFilter);
+    const matchSchool = selectedSchoolFilter === 'ALL' || 
+      ex.schoolId === selectedSchoolFilter || 
+      (Boolean(ex.schoolName) && Boolean(selectedSchoolObj?.name) && ex.schoolName.toLowerCase() === selectedSchoolObj?.name.toLowerCase());
+
+    const selectedClassObj = classes.find(c => c.id === selectedClassFilter);
+    const matchClass = selectedClassFilter === 'ALL' || 
+      ex.classId === selectedClassFilter || 
+      (Boolean(ex.className) && Boolean(selectedClassObj?.name) && ex.className.toLowerCase() === selectedClassObj?.name.toLowerCase());
+
     const matchStatus = filterStatus === 'ALL' || ex.status === filterStatus;
-    const matchSearch = ex.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      ex.className.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      ex.packageTitle.toLowerCase().includes(searchQuery.toLowerCase());
+    const qLower = (searchQuery || '').toLowerCase();
+    const matchSearch = (ex.title || '').toLowerCase().includes(qLower) ||
+      (ex.className || '').toLowerCase().includes(qLower) ||
+      (ex.packageTitle || '').toLowerCase().includes(qLower);
     
     return matchSchool && matchClass && matchStatus && matchSearch;
   });
