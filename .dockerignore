@@ -4,8 +4,14 @@
 **/.env
 **/.env.*
 !**/.env.example
+.auth_secret
+**/.auth_secret
 backend/data
 backend/data/**
+**/evidence_storage
+**/*.backup.json
+**/test_*.mjs
+**/test_*.js
 **/.aistudio
 *.zip
 *.rar

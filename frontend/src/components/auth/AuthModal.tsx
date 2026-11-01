@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Role, Teacher, School, ClassRoom } from '../../types';
 import { PRESET_USERS, INITIAL_SCHOOLS, INITIAL_CLASSES, INITIAL_TEACHERS } from '../../data/mockData';
+import { setAuthToken } from '../../services/api';
 import { 
   LogIn, UserPlus, KeyRound, CheckCircle2, AlertCircle, School as SchoolIcon, 
   GraduationCap, ArrowRight, ShieldCheck, Info, Award, FlaskConical, Compass, 
@@ -82,109 +83,51 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    // 1. Kumpulkan semua sumber data guru (props, INITIAL_TEACHERS, dan localStorage)
-    let allTeacherList: Teacher[] = [...INITIAL_TEACHERS, ...(teachers || [])];
-    try {
-      const savedTeachers = localStorage.getItem('voc_teachers');
-      if (savedTeachers) {
-        const parsed = JSON.parse(savedTeachers);
-        if (Array.isArray(parsed)) {
-          allTeacherList = [...allTeacherList, ...parsed];
-        }
-      }
-    } catch {}
-
-    // Petakan semua akun guru menjadi format User
-    const teacherUsers: User[] = allTeacherList.map(t => ({
-      id: t.id,
-      name: t.name,
-      email: t.email,
-      role: 'guru',
-      identityNo: t.identityNo,
-      schoolId: t.schoolId,
-      schoolName: t.schoolName,
-      phone: t.phone,
-      password: t.password || '123456'
-    }));
-
-    // 2. Ambil user terdaftar tambahan dari localStorage
-    let storedUsers: User[] = [];
-    try {
-      const savedReg = localStorage.getItem('voc_registered_users');
-      if (savedReg) {
-        const parsed = JSON.parse(savedReg);
-        if (Array.isArray(parsed)) storedUsers = parsed;
-      }
-    } catch {}
-
-    // 3. Gabungkan seluruh daftar akun untuk verifikasi lokal
-    const allUsersMap = new Map<string, User>();
-    [...PRESET_USERS, ...registeredUsers, ...storedUsers, ...teacherUsers].forEach(u => {
-      if (u && u.email) {
-        allUsersMap.set(u.email.toLowerCase().trim(), u);
-      }
-    });
-
-    const foundUser = allUsersMap.get(cleanEmail);
-
-    if (foundUser) {
-      const expectedPassword = foundUser.password;
-      const isValid = Boolean(expectedPassword && cleanPassword === expectedPassword);
-
-      if (!isValid) {
-        setLoginError('Email atau password salah.');
-        return;
-      }
-
-      onLoginSuccess(foundUser);
-      return;
-    }
-
-    // 4. Fallback ke endpoint server backend /api/auth/login
+    // 1. Autentikasi ketat ke backend server untuk mendapatkan auth token resmi (Mencegah Bypass Offline)
     try {
       const resp = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: cleanEmail, password: cleanPassword })
       });
-      const data = await resp.json();
-      if (data.success && data.user) {
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.success && data.user) {
+        if (data.token) {
+          setAuthToken(data.token);
+        }
         onLoginSuccess(data.user);
         return;
       } else {
-        setLoginError(data.error || 'Akun belum terdaftar dalam sistem.');
+        // Server menolak kredensial: Tampilkan pesan error dan JANGAN izinkan bypass offline
+        setLoginError(data.error || 'Email atau password salah.');
         return;
       }
     } catch (apiErr) {
-      // 5. Offline Fallback jika ada kecocokan di daftar guru
-      const matchedTeacher = allTeacherList.find(t => t.email.toLowerCase().trim() === cleanEmail);
-      if (matchedTeacher) {
-        const fallbackTeacherUser: User = {
-          id: matchedTeacher.id,
-          name: matchedTeacher.name,
-          email: matchedTeacher.email,
-          role: 'guru',
-          identityNo: matchedTeacher.identityNo,
-          schoolId: matchedTeacher.schoolId,
-          schoolName: matchedTeacher.schoolName,
-          phone: matchedTeacher.phone,
-          password: matchedTeacher.password
-        };
-        const expectedPassword = fallbackTeacherUser.password;
-        if (expectedPassword && cleanPassword === expectedPassword) {
-          onLoginSuccess(fallbackTeacherUser);
-          return;
-        } else {
-          setLoginError('Email atau password salah.');
-          return;
-        }
-      }
-      setLoginError('Akun belum terdaftar dalam sistem.');
+      console.warn('Backend login connection error:', apiErr);
+      setLoginError('Tidak dapat terhubung ke server autentikasi. Pastikan koneksi server atau jaringan aktif.');
+      return;
     }
   };
 
-  const handlePresetSelect = (presetUser: User) => {
-    onLoginSuccess(presetUser);
+  const handlePresetSelect = async (presetUser: User) => {
+    setLoginError('');
+    try {
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: presetUser.email, password: presetUser.password || 'password' })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.success && data.token) {
+        setAuthToken(data.token);
+        onLoginSuccess(data.user || presetUser);
+        return;
+      }
+      setLoginError(data.error || 'Autentikasi akun preset ditolak oleh server.');
+    } catch (err) {
+      console.warn('Preset login network error:', err);
+      setLoginError('Koneksi ke server autentikasi gagal. Login tidak dapat diproses secara offline.');
+    }
   };
 
   const handleRegisterSubmit = (e: React.FormEvent) => {

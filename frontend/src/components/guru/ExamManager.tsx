@@ -190,16 +190,26 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
     }
 
     const pkgObj = packages.find(p => p.id === packageId);
+    if (!pkgObj) {
+      setFormError('Paket soal yang dipilih tidak valid atau belum tersedia. Silakan pilih paket soal yang valid.');
+      return;
+    }
+
     const classObj = classes.find(c => c.id === classId);
     const schoolObj = schoolsList.find(s => s.id === modalSchoolId);
 
     if (editingExam) {
+      const packageChanged = editingExam.packageId !== packageId;
       onUpdateExam({
         ...editingExam,
         title: title.trim(),
         packageId,
-        packageTitle: pkgObj?.title || editingExam.packageTitle,
-        category: pkgObj?.category || editingExam.category,
+        packageTitle: pkgObj.title,
+        packageVersion: pkgObj.version || 1,
+        questionSnapshot: (packageChanged && Array.isArray(pkgObj.questions))
+          ? JSON.parse(JSON.stringify(pkgObj.questions))
+          : (editingExam.questionSnapshot || (Array.isArray(pkgObj.questions) ? JSON.parse(JSON.stringify(pkgObj.questions)) : [])),
+        category: pkgObj.category,
         classId,
         className: classObj?.name || editingExam.className,
         schoolId: modalSchoolId,
@@ -217,8 +227,10 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
         id: `ex-${Date.now()}`,
         title: title.trim(),
         packageId,
-        packageTitle: pkgObj?.title || 'Paket Asesmen Teknis Kimia',
-        category: pkgObj?.category || 'teknis_kimia',
+        packageTitle: pkgObj.title,
+        packageVersion: pkgObj.version || 1,
+        questionSnapshot: Array.isArray(pkgObj.questions) ? JSON.parse(JSON.stringify(pkgObj.questions)) : [],
+        category: pkgObj.category,
         classId,
         className: classObj?.name || 'XII Kimia Analitik 1',
         schoolId: modalSchoolId,
@@ -228,7 +240,7 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
         scheduleDate,
         startTime,
         endTime,
-        durationMinutes,
+        durationMinutes: durationMinutes || pkgObj.durationMinutes || 60,
         targetScore,
         status,
         randomizeQuestions,

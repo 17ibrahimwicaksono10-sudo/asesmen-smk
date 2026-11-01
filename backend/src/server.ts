@@ -6,8 +6,17 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import { initDb, getDb, saveDb, resetDb } from "./db";
-import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact } from "./types";
+import { initDb, getDb, saveDb, resetDb, getEvidenceStorageDir } from "./db";
+import {
+  requireAuth,
+  optionalAuth,
+  requireRole,
+  sanitizeUser,
+  sanitizeSettings,
+  generateAuthToken,
+  AuthenticatedRequest,
+} from "./auth";
+import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
 import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
 
@@ -26,22 +35,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Inisialisasi Repositori Penyimpanan Persisten Berkas Bukti (Audit-Ready Storage)
-function getEvidenceStorageDir(): string {
-  const candidateDirs = [
-    path.resolve(process.cwd(), "backend", "data", "evidence_storage"),
-    path.resolve(process.cwd(), "data", "evidence_storage"),
-    path.join(__dirname, "../data/evidence_storage"),
-  ];
-  for (const dir of candidateDirs) {
-    if (fs.existsSync(dir)) return dir;
-  }
-  const target = candidateDirs[0];
-  if (!fs.existsSync(target)) {
-    fs.mkdirSync(target, { recursive: true });
-  }
-  return target;
-}
-
 const EVIDENCE_STORAGE_DIR = getEvidenceStorageDir();
 if (!fs.existsSync(EVIDENCE_STORAGE_DIR)) {
   fs.mkdirSync(EVIDENCE_STORAGE_DIR, { recursive: true });
@@ -252,7 +245,110 @@ app.get("/api/health", (_req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Bootstrap: Ambil semua data awal dalam 1 request
 // -------------------------------------------------------------
-app.get("/api/bootstrap", (_req: Request, res: Response) => {
+// -------------------------------------------------------------
+// Endpoint Ringkasan Dashboard (Ringan & Cepat < 2 KB)
+// -------------------------------------------------------------
+app.get("/api/dashboard/summary", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const user = req.user;
+
+  if (!user || user.role === "admin") {
+    const totalStudents = (db.users || []).filter(u => u.role === "siswa").length;
+    const totalExams = (db.exams || []).length;
+    const totalSubmissions = (db.submissions || []).length;
+    const pendingReviews = (db.submissions || []).filter(s => s.status === "perlu_pemeriksaan" || s.requiresTeacherReview).length;
+    const graded = (db.submissions || []).filter(s => s.status === "dinilai").length;
+
+    return res.json({
+      success: true,
+      summary: {
+        role: "admin",
+        totalSchools: (db.schools || []).length,
+        totalClasses: (db.classes || []).length,
+        totalTeachers: (db.teachers || []).length,
+        totalStudents,
+        totalExams,
+        totalSubmissions,
+        pendingReviews,
+        gradedSubmissions: graded,
+      }
+    });
+  }
+
+  if (user.role === "guru") {
+    const isSchoolMatch = (s1?: string, s2?: string) => {
+      if (!s1 || !s2) return false;
+      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
+    };
+
+    const myClasses = (db.classes || []).filter(c =>
+      c.teacherId === user.userId ||
+      c.teacherName === user.name ||
+      (user.schoolId && c.schoolId === user.schoolId) ||
+      (user.schoolName && isSchoolMatch(c.schoolName, user.schoolName))
+    );
+
+    const myExams = (db.exams || []).filter(e =>
+      e.teacherId === user.userId ||
+      e.teacherName === user.name ||
+      (user.schoolId && e.schoolId === user.schoolId) ||
+      (user.schoolName && isSchoolMatch(e.schoolName, user.schoolName))
+    );
+
+    const mySubmissions = (db.submissions || []).filter(sub => {
+      const matchClass = myClasses.some(c => c.name.toLowerCase() === sub.className?.toLowerCase());
+      const matchExam = myExams.some(e => e.id === sub.examId);
+      return matchClass || matchExam;
+    });
+
+    return res.json({
+      success: true,
+      summary: {
+        role: "guru",
+        myClassesCount: myClasses.length,
+        totalStudentsInClasses: myClasses.reduce((acc, c) => acc + (c.studentCount || 0), 0),
+        totalStudents: myClasses.reduce((acc, c) => acc + (c.studentCount || 0), 0),
+        myExamsCount: myExams.length,
+        mySubmissionsCount: mySubmissions.length,
+        pendingReviewsCount: mySubmissions.filter(s => s.status === "perlu_pemeriksaan" || s.requiresTeacherReview).length,
+        gradedSubmissionsCount: mySubmissions.filter(s => s.status === "dinilai").length,
+      }
+    });
+  }
+
+  // Role: Siswa
+  const mySubmissions = (db.submissions || []).filter(s =>
+    s.studentId === user.userId ||
+    (user.email && (s as any).studentEmail?.toLowerCase() === user.email.toLowerCase()) ||
+    (user.name && s.studentName?.toLowerCase() === user.name.toLowerCase())
+  );
+
+  return res.json({
+    success: true,
+    summary: {
+      role: "siswa",
+      myExamsCount: mySubmissions.length,
+      completedExamsCount: mySubmissions.length,
+      mySubmissions: mySubmissions.map(s => ({
+        id: s.id,
+        examId: s.examId,
+        examTitle: s.examTitle,
+        totalScore: s.totalScore,
+        technicalScore: s.technicalScore,
+        employabilityScore: s.employabilityScore,
+        status: s.status,
+        submitTime: s.submitTime,
+      }))
+    }
+  });
+});
+
+// -------------------------------------------------------------
+// Bootstrap: Ambil konfigurasi & katalog awal (< 50 KiB, Tanpa Base64)
+// -------------------------------------------------------------
+app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
 
   // Ensure all teachers in db.teachers are also in db.users so they can login immediately
@@ -367,26 +463,100 @@ app.get("/api/bootstrap", (_req: Request, res: Response) => {
 
   if (changed) saveDb();
 
+  // Sanitasi data: Hapus password guru
+  const safeTeachers = (db.teachers || []).map(t => {
+    const { password, ...safe } = t;
+    return safe;
+  });
+
+  // Sanitasi data: Pengguna hanya dikirim jika login, dan tanpa password
+  const safeUsers = req.user ? (db.users || []).map(sanitizeUser) : [];
+
+  // Sanitasi konfigurasi sistem: Hilangkan API keys Gemini & DeepSeek
+  const safeSettings = sanitizeSettings(db.settings);
+
+  // Sanitasi daftar ujian (ringkas)
+  const safeExams = (db.exams || []).map(e => ({ ...e }));
+
+  // Sanitasi submission: TIDAK MENGIRIMKAN Base64 dan jawaban berat di bootstrap
+  // Sanitasi submission: Isolasi data berdasarkan hak akses (Anti-Bypass & Perlindungan Data Siswa)
+  let rawSubmissions = db.submissions || [];
+  if (!req.user) {
+    // Pengguna belum login: JANGAN bocorkan data submission siswa ke publik
+    rawSubmissions = [];
+  } else if (req.user.role === 'siswa') {
+    // Siswa hanya boleh menerima submission miliknya sendiri
+    rawSubmissions = rawSubmissions.filter(s =>
+      s.studentId === req.user?.userId ||
+      (req.user?.identityNo && s.studentNis === req.user.identityNo) ||
+      (req.user?.email && (s as any).studentEmail?.toLowerCase() === req.user.email.toLowerCase())
+    );
+  } else if (req.user.role === 'guru') {
+    // Guru hanya menerima submission sekolah / kelas binaannya
+    const isSchoolMatch = (s1?: string, s2?: string) => {
+      if (!s1 || !s2) return false;
+      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
+    };
+    rawSubmissions = rawSubmissions.filter(s => {
+      return (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
+        (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName)) ||
+        (req.user?.className && s.className && s.className.toLowerCase() === req.user.className.toLowerCase());
+    });
+  }
+
+  const safeSubmissions = rawSubmissions.map(s => {
+    const safeEvidences = Array.isArray(s.evidences)
+      ? s.evidences.map(ev => {
+          const { fileData, ...cleanEv } = ev;
+          return cleanEv;
+        })
+      : [];
+
+    return {
+      id: s.id,
+      examId: s.examId,
+      examTitle: s.examTitle,
+      studentId: s.studentId,
+      studentName: s.studentName,
+      studentNis: s.studentNis,
+      studentEmail: s.studentEmail,
+      schoolName: s.schoolName,
+      className: s.className,
+      submitTime: s.submitTime,
+      totalScore: s.totalScore,
+      technicalScore: s.technicalScore,
+      employabilityScore: s.employabilityScore,
+      status: s.status,
+      requiresTeacherReview: s.requiresTeacherReview,
+      aiEvaluation: s.aiEvaluation,
+      teacherFollowUp: s.teacherFollowUp,
+      evidences: safeEvidences,
+      answers: (req.user?.role === 'siswa' && s.studentId === req.user?.userId) ? s.answers : undefined,
+    };
+  });
+
   res.json({
     success: true,
     data: {
-      users: db.users,
-      schools: db.schools,
-      classes: db.classes,
-      teachers: db.teachers,
-      packages: db.packages,
-      exams: db.exams,
-      submissions: db.submissions,
-      archives: db.archives,
-      settings: db.settings,
+      users: safeUsers,
+      schools: db.schools || [],
+      classes: db.classes || [],
+      teachers: safeTeachers,
+      packages: db.packages || [],
+      exams: safeExams,
+      submissions: safeSubmissions,
+      archives: db.archives || [],
+      settings: safeSettings,
       portfolios: db.portfolios || [],
       lastUpdated: db.lastUpdated,
     },
   });
 });
 
-// Endpoint Reset Basis Data ke Kondisi Bersih Pilot Testing
-app.post("/api/admin/reset-database", (_req: Request, res: Response) => {
+// Endpoint Reset Basis Data ke Kondisi Bersih Pilot Testing (HANYA ADMIN)
+app.post("/api/admin/reset-database", requireAuth, requireRole("admin"), (_req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   db.users = [
     {
@@ -415,22 +585,32 @@ app.post("/api/admin/reset-database", (_req: Request, res: Response) => {
 // -------------------------------------------------------------
 app.post("/api/auth/register", (req: Request, res: Response) => {
   try {
-    const { name, email, identityNo, role, schoolName, className, classId } = req.body;
+    const { name, email, password, identityNo, role, schoolName, className, classId } = req.body;
 
     if (!name || !email) {
       return res.status(400).json({ success: false, error: "Nama dan email wajib diisi." });
     }
 
+    const cleanEmail = email.trim().toLowerCase();
+    const userPassword = (password && typeof password === 'string') ? password.trim() : "password123";
     const db = getDb();
-    const existing = db.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+    const existing = db.users.find((u) => u.email.toLowerCase() === cleanEmail);
     if (existing) {
-      return res.status(400).json({ success: false, error: "Email sudah terdaftar." });
+      if (!existing.password) {
+        existing.password = userPassword;
+      }
+      if (className && !existing.className) existing.className = className.trim();
+      if (classId && !existing.classId) existing.classId = classId.trim();
+      saveDb();
+      const token = generateAuthToken(existing);
+      return res.json({ success: true, user: sanitizeUser(existing), token, message: "User sudah terdaftar." });
     }
 
     const newUser: User = {
       id: `usr-reg-${Date.now()}`,
       name: name.trim(),
-      email: email.trim(),
+      email: cleanEmail,
+      password: userPassword,
       role: role || "siswa",
       identityNo: identityNo?.trim() || `NIS-${Date.now().toString().slice(-5)}`,
       schoolName: schoolName?.trim() || "SMK Mitra Industri",
@@ -442,7 +622,8 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
     saveDb();
 
     console.log(`[DB] Registrasi siswa/pengguna baru berhasil: ${newUser.name} (${newUser.email})`);
-    res.json({ success: true, user: newUser });
+    const token = generateAuthToken(newUser);
+    res.json({ success: true, user: sanitizeUser(newUser), token });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -468,6 +649,7 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
         email: teacher.email,
         role: "guru",
         identityNo: teacher.identityNo,
+        schoolId: teacher.schoolId,
         schoolName: teacher.schoolName,
         phone: teacher.phone,
         password: teacher.password || "123456",
@@ -488,15 +670,53 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
     return res.status(401).json({ success: false, error: "Email atau password salah." });
   }
 
-  res.json({ success: true, user });
+  const token = generateAuthToken(user);
+  res.json({ success: true, user: sanitizeUser(user), token });
 });
 
-app.get("/api/auth/users", (_req: Request, res: Response) => {
+app.post("/api/auth/restore-token", (req: Request, res: Response) => {
+  const { email, id } = req.body;
+  if (!email && !id) {
+    return res.status(400).json({ success: false, error: "Email atau user ID diperlukan." });
+  }
+
   const db = getDb();
-  res.json({ success: true, users: db.users });
+  const cleanEmail = (email || "").trim().toLowerCase();
+  let user = db.users.find((u) => (id && u.id === id) || (cleanEmail && u.email.toLowerCase() === cleanEmail));
+
+  if (!user && cleanEmail) {
+    const teacher = db.teachers.find((t) => t.email.toLowerCase() === cleanEmail);
+    if (teacher) {
+      user = {
+        id: teacher.id,
+        name: teacher.name,
+        email: teacher.email,
+        role: "guru",
+        identityNo: teacher.identityNo,
+        schoolId: teacher.schoolId,
+        schoolName: teacher.schoolName,
+        phone: teacher.phone,
+        password: teacher.password || "123456",
+      };
+      db.users.push(user);
+      saveDb();
+    }
+  }
+
+  if (!user) {
+    return res.status(404).json({ success: false, error: "Pengguna tidak ditemukan." });
+  }
+
+  const token = generateAuthToken(user);
+  res.json({ success: true, user: sanitizeUser(user), token });
 });
 
-app.post("/api/auth/reset-password", (req: Request, res: Response) => {
+app.get("/api/auth/users", requireAuth, requireRole("admin", "guru"), (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  res.json({ success: true, users: db.users.map(sanitizeUser) });
+});
+
+app.post("/api/auth/reset-password", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   try {
     const { userId, email, newPassword } = req.body;
     if (!newPassword || newPassword.trim().length < 4) {
@@ -514,26 +734,15 @@ app.post("/api/auth/reset-password", (req: Request, res: Response) => {
       user = db.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
     }
 
-    // Jika user belum ada di db.users tapi ada di teachers
-    if (!user && userId) {
-      const teacher = db.teachers.find((t) => t.id === userId);
-      if (teacher) {
-        user = {
-          id: teacher.id,
-          name: teacher.name,
-          email: teacher.email,
-          role: "guru",
-          identityNo: teacher.identityNo,
-          schoolName: teacher.schoolName,
-          phone: teacher.phone,
-          password: cleanPass,
-        };
-        db.users.push(user);
-      }
-    }
-
     if (!user) {
       return res.status(404).json({ success: false, error: "Akun pengguna tidak ditemukan." });
+    }
+
+    // Hanya Admin atau pemilik akun sendiri yang boleh mereset password
+    const isSelf = req.user && (req.user.id === user.id || req.user.userId === user.id);
+    const isAdmin = req.user && req.user.role === "admin";
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({ success: false, error: "Akses ditolak: Anda tidak memiliki wewenang mereset password akun ini." });
     }
 
     user.password = cleanPass;
@@ -545,14 +754,15 @@ app.post("/api/auth/reset-password", (req: Request, res: Response) => {
     }
 
     saveDb();
-    console.log(`[DB] Password akun ${user.name} (${user.email}) berhasil direset oleh Admin ke: ${cleanPass}`);
-    res.json({ success: true, message: `Password akun ${user.name} berhasil direset.`, user });
+    console.log(`[DB] Password akun ${user.name} (${user.email}) berhasil direset oleh ${req.user.name}`);
+    const { password, ...safeUser } = user;
+    res.json({ success: true, message: `Password akun ${user.name} berhasil direset.`, user: safeUser });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-app.put("/api/auth/users/:id", (req: Request, res: Response) => {
+app.put("/api/auth/users/:id", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const db = getDb();
@@ -561,26 +771,42 @@ app.put("/api/auth/users/:id", (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: "Pengguna tidak ditemukan." });
     }
 
-    db.users[idx] = { ...db.users[idx], ...req.body };
+    const isSelf = req.user && (req.user.id === id || req.user.userId === id);
+    const isAdmin = req.user && req.user.role === "admin";
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({ success: false, error: "Akses ditolak: Anda hanya dapat memperbarui profil sendiri." });
+    }
+
+    // Cegah eskalasi privilege: non-admin tidak boleh mengubah role atau ID
+    const updates = { ...req.body };
+    if (!isAdmin) {
+      delete updates.role;
+      delete updates.id;
+      delete updates.identityNo;
+    }
+    delete updates.password; // Update password hanya lewat reset-password
+
+    db.users[idx] = { ...db.users[idx], ...updates };
     saveDb();
-    res.json({ success: true, user: db.users[idx] });
+    const { password, ...safeUser } = db.users[idx];
+    res.json({ success: true, user: safeUser });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // -------------------------------------------------------------
-// CRUD - Schools
+// CRUD - Schools (HANYA ADMIN)
 // -------------------------------------------------------------
-app.post("/api/schools", (req: Request, res: Response) => {
+app.post("/api/schools", requireAuth, requireRole("admin"), (_req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  const newSchool: School = req.body;
+  const newSchool: School = _req.body;
   db.schools.push(newSchool);
   saveDb();
   res.json({ success: true, school: newSchool });
 });
 
-app.put("/api/schools/:id", (req: Request, res: Response) => {
+app.put("/api/schools/:id", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updatedSchool: School = req.body;
@@ -589,7 +815,7 @@ app.put("/api/schools/:id", (req: Request, res: Response) => {
   res.json({ success: true, school: updatedSchool });
 });
 
-app.delete("/api/schools/:id", (req: Request, res: Response) => {
+app.delete("/api/schools/:id", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   db.schools = db.schools.filter((s) => s.id !== id);
@@ -598,17 +824,17 @@ app.delete("/api/schools/:id", (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// CRUD - Classes
+// CRUD - Classes (ADMIN & GURU)
 // -------------------------------------------------------------
-app.post("/api/classes", (req: Request, res: Response) => {
+app.post("/api/classes", requireAuth, requireRole("admin", "guru"), (_req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  const newClass: ClassRoom = req.body;
+  const newClass: ClassRoom = _req.body;
   db.classes.push(newClass);
   saveDb();
   res.json({ success: true, class: newClass });
 });
 
-app.put("/api/classes/:id", (req: Request, res: Response) => {
+app.put("/api/classes/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updatedClass: ClassRoom = req.body;
@@ -617,7 +843,7 @@ app.put("/api/classes/:id", (req: Request, res: Response) => {
   res.json({ success: true, class: updatedClass });
 });
 
-app.delete("/api/classes/:id", (req: Request, res: Response) => {
+app.delete("/api/classes/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   db.classes = db.classes.filter((c) => c.id !== id);
@@ -626,9 +852,9 @@ app.delete("/api/classes/:id", (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// CRUD - Teachers
+// CRUD - Teachers (HANYA ADMIN)
 // -------------------------------------------------------------
-app.post("/api/teachers", (req: Request, res: Response) => {
+app.post("/api/teachers", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newTeacher: Teacher = req.body;
   
@@ -647,6 +873,7 @@ app.post("/api/teachers", (req: Request, res: Response) => {
     email: newTeacher.email,
     role: "guru",
     identityNo: newTeacher.identityNo,
+    schoolId: newTeacher.schoolId,
     schoolName: newTeacher.schoolName,
     phone: newTeacher.phone,
     password: newTeacher.password || "123456",
@@ -661,10 +888,10 @@ app.post("/api/teachers", (req: Request, res: Response) => {
 
   saveDb();
   console.log(`[DB] Akun Guru berhasil dibuat & disinkronkan ke daftar login: ${teacherUser.name} (${teacherUser.email})`);
-  res.json({ success: true, teacher: newTeacher, user: teacherUser });
+  res.json({ success: true, teacher: newTeacher, user: sanitizeUser(teacherUser) });
 });
 
-app.put("/api/teachers/:id", (req: Request, res: Response) => {
+app.put("/api/teachers/:id", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updatedTeacher: Teacher = req.body;
@@ -699,7 +926,7 @@ app.put("/api/teachers/:id", (req: Request, res: Response) => {
   res.json({ success: true, teacher: updatedTeacher });
 });
 
-app.delete("/api/teachers/:id", (req: Request, res: Response) => {
+app.delete("/api/teachers/:id", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const teacherToDelete = db.teachers.find((t) => t.id === id);
@@ -714,26 +941,66 @@ app.delete("/api/teachers/:id", (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// CRUD - Question Packages
+// CRUD - Question Packages (ADMIN & GURU)
 // -------------------------------------------------------------
-app.post("/api/packages", (req: Request, res: Response) => {
+app.get("/api/packages", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  res.json({ success: true, data: db.packages || [], packages: db.packages || [] });
+});
+
+app.get("/api/packages/:id", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { id } = req.params;
+  const pkg = db.packages?.find((p) => p.id === id);
+  if (!pkg) {
+    return res.status(404).json({ success: false, error: `Paket soal dengan ID "${id}" tidak ditemukan.` });
+  }
+  res.json({ success: true, data: pkg, package: pkg });
+});
+
+app.post("/api/packages", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newPkg: QuestionPackage = req.body;
-  db.packages.push(newPkg);
+  if (!newPkg || !newPkg.title) {
+    return res.status(400).json({ success: false, error: "Judul paket soal wajib diisi." });
+  }
+  if (!newPkg.id) {
+    newPkg.id = `pkg-${Date.now()}`;
+  }
+  newPkg.version = 1;
+  newPkg.totalQuestions = Array.isArray(newPkg.questions) ? newPkg.questions.length : 0;
+  
+  // Periksa apakah ID sudah ada
+  const existingIdx = db.packages.findIndex(p => p.id === newPkg.id);
+  if (existingIdx >= 0) {
+    db.packages[existingIdx] = newPkg;
+  } else {
+    db.packages.push(newPkg);
+  }
   saveDb();
+  console.log(`[Packages] Paket soal baru disimpan: "${newPkg.title}" (${newPkg.id}, ${newPkg.totalQuestions} soal)`);
   res.json({ success: true, package: newPkg });
 });
 
-app.put("/api/packages/:id", (req: Request, res: Response) => {
+app.put("/api/packages/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updatedPkg: QuestionPackage = req.body;
-  db.packages = db.packages.map((p) => (p.id === id ? updatedPkg : p));
+  const existingIdx = db.packages.findIndex((p) => p.id === id);
+  if (existingIdx < 0) {
+    return res.status(404).json({ success: false, error: `Paket soal dengan ID "${id}" tidak ditemukan.` });
+  }
+
+  const existing = db.packages[existingIdx];
+  updatedPkg.version = (existing.version || 1) + 1;
+  updatedPkg.totalQuestions = Array.isArray(updatedPkg.questions) ? updatedPkg.questions.length : 0;
+  db.packages[existingIdx] = updatedPkg;
   saveDb();
+  console.log(`[Packages] Paket soal diperbarui: "${updatedPkg.title}" (${id}, v${updatedPkg.version}, ${updatedPkg.totalQuestions} soal)`);
   res.json({ success: true, package: updatedPkg });
 });
 
-app.delete("/api/packages/:id", (req: Request, res: Response) => {
+app.delete("/api/packages/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const pkg = db.packages.find((p) => p.id === id);
@@ -752,26 +1019,255 @@ app.delete("/api/packages/:id", (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// CRUD - Exams
+// CRUD - Exams (ADMIN & GURU) & Question Resolver
 // -------------------------------------------------------------
-app.post("/api/exams", (req: Request, res: Response) => {
+app.get("/api/exams", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  res.json({ success: true, data: db.exams || [], exams: db.exams || [] });
+});
+
+// Helper: Sanitasi butir soal agar TIDAK membocorkan kunci jawaban dan rubrik rahasia ke browser siswa
+export function sanitizeQuestionsForStudent(questions: QuestionItem[]): any[] {
+  return (questions || []).map(q => {
+    const clean: any = {
+      id: q.id,
+      code: (q as any).code,
+      number: q.number,
+      category: q.category,
+      topic: q.topic,
+      questionText: q.questionText,
+      type: q.type,
+      points: q.points,
+      maxScore: q.maxScore || q.points,
+      requiresMultimodal: q.requiresMultimodal,
+      allowedEvidenceTypes: q.allowedEvidenceTypes,
+      instructions: q.instructions,
+      contextText: q.contextText,
+      dataTables: q.dataTables,
+      options: q.options ? [...q.options] : undefined,
+    };
+
+    if (q.subQuestions) {
+      clean.subQuestions = q.subQuestions.map(sq => ({
+        id: sq.id,
+        label: sq.label,
+        prompt: sq.prompt,
+        points: sq.points
+      }));
+    }
+
+    if (q.matchingColumnA) {
+      clean.matchingColumnA = q.matchingColumnA.map(m => ({
+        id: m.id,
+        label: m.label,
+        item: m.item
+        // OMIT m.correctMatch! Siswa tidak boleh melihat kunci pasangan
+      }));
+    }
+
+    if (q.matchingColumnB) {
+      clean.matchingColumnB = q.matchingColumnB.map(m => ({
+        id: m.id,
+        label: m.label,
+        match: m.match
+      }));
+    }
+
+    if (q.statements) {
+      clean.statements = q.statements.map(s => ({
+        id: s.id,
+        statement: s.statement,
+        options: s.options ? [...s.options] : undefined
+        // OMIT s.correctAnswer! Siswa tidak boleh melihat kunci pernyataan
+      }));
+    }
+
+    // STRICT PROTECTION:
+    // Hapus total correctAnswer, correctAnswers, shortAnswerKey, shortAnswerKey2,
+    // scoringMap, rubricGuide, evaluationRubric, scoringRubric, sampleAnswer,
+    // keywords, correctStep agar siswa tidak bisa mencontek dari DevTools/Network!
+    return clean;
+  });
+}
+
+// Endpoint Pembukaan Soal Ujian Siswa (Resolusi Referensi Paket yang Kuat & Snapshot Konsisten)
+app.get("/api/exams/:id/questions", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { id } = req.params;
+  const exam = db.exams?.find(e => e.id === id);
+  if (!exam) {
+    return res.status(404).json({ success: false, error: "Jadwal ujian tidak ditemukan." });
+  }
+
+  // 1. Otorisasi Akses Siswa: Larang siswa mengakses soal ujian di luar kelas atau sekolahnya
+  if (req.user && req.user.role === 'siswa') {
+    const studentClassId = req.user.classId?.trim();
+    const studentClassName = req.user.className?.toLowerCase()?.trim();
+    const studentSchoolId = req.user.schoolId?.trim();
+    const studentSchoolName = req.user.schoolName?.toLowerCase()?.trim();
+    const examClassId = exam.classId?.trim();
+    const examClassName = exam.className?.toLowerCase()?.trim();
+    const examSchoolId = exam.schoolId?.trim();
+    const examSchoolName = exam.schoolName?.toLowerCase()?.trim();
+
+    let isClassMatch = true;
+    if (examClassId || examClassName) {
+      if (examClassId && studentClassId && examClassId === studentClassId) {
+        isClassMatch = true;
+      } else if (examClassName && studentClassName && (
+        examClassName === studentClassName ||
+        examClassName.includes(studentClassName) ||
+        studentClassName.includes(examClassName)
+      )) {
+        isClassMatch = true;
+      } else {
+        isClassMatch = false;
+      }
+    }
+
+    let isSchoolMatch = true;
+    if (examSchoolId || examSchoolName) {
+      if (examSchoolId && studentSchoolId && examSchoolId === studentSchoolId) {
+        isSchoolMatch = true;
+      } else if (examSchoolName && studentSchoolName && (
+        examSchoolName === studentSchoolName ||
+        examSchoolName.includes(studentSchoolName) ||
+        studentSchoolName.includes(examSchoolName)
+      )) {
+        isSchoolMatch = true;
+      } else {
+        isSchoolMatch = false;
+      }
+    }
+
+    if (!isClassMatch || !isSchoolMatch) {
+      return res.status(403).json({
+        success: false,
+        error: `Akses ditolak: Ujian "${exam.title}" ditujukan untuk kelas "${exam.className || '-'}" dan tidak ditugaskan kepada Anda.`,
+        code: "FORBIDDEN"
+      });
+    }
+  }
+
+  // 2. Ambil snapshot butir soal mentah (lengkap dengan kunci untuk guru/admin/penilaian)
+  let rawQuestions: QuestionItem[] = [];
+  if (Array.isArray(exam.questionSnapshot) && exam.questionSnapshot.length > 0) {
+    rawQuestions = exam.questionSnapshot;
+  } else {
+    const pkg = db.packages?.find(p => p.id === exam.packageId);
+    if (!pkg) {
+      return res.status(404).json({
+        success: false,
+        error: `Paket soal "${exam.packageTitle || exam.packageId}" tidak ditemukan dalam sistem. Harap hubungi guru/admin.`
+      });
+    }
+
+    if (!Array.isArray(pkg.questions) || pkg.questions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Paket soal "${pkg.title}" belum memiliki butir soal yang dapat dikerjakan.`
+      });
+    }
+
+    // Simpan snapshot ke exam agar konsisten dan tidak berubah jika paket diedit kemudian hari
+    exam.questionSnapshot = JSON.parse(JSON.stringify(pkg.questions));
+    exam.packageVersion = pkg.version || 1;
+    saveDb();
+    rawQuestions = exam.questionSnapshot;
+  }
+
+  const pkg = db.packages?.find(p => p.id === exam.packageId);
+
+  // 3. Sensor data rahasia jika pengakses adalah siswa (atau pengguna tanpa hak akses guru/admin)
+  const isTeacherOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'guru');
+  const safeQuestions = isTeacherOrAdmin ? rawQuestions : sanitizeQuestionsForStudent(rawQuestions);
+
+  const safePackageObj = pkg ? {
+    ...pkg,
+    questions: isTeacherOrAdmin ? pkg.questions : sanitizeQuestionsForStudent(pkg.questions)
+  } : {
+    id: exam.packageId,
+    title: exam.packageTitle,
+    category: exam.category,
+    questions: safeQuestions,
+    totalQuestions: rawQuestions.length,
+    durationMinutes: exam.durationMinutes
+  };
+
+  return res.json({
+    success: true,
+    examId: exam.id,
+    examTitle: exam.title,
+    packageId: exam.packageId,
+    packageTitle: exam.packageTitle,
+    category: exam.category,
+    totalQuestions: rawQuestions.length,
+    questions: safeQuestions,
+    packageObj: safePackageObj
+  });
+});
+
+app.post("/api/exams", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newExam: Exam = req.body;
+  if (!newExam || !newExam.title) {
+    return res.status(400).json({ success: false, error: "Judul ujian wajib diisi." });
+  }
+
+  // Cari paket soal yang dipilih
+  const pkg = db.packages?.find(p => p.id === newExam.packageId);
+  if (!pkg) {
+    return res.status(400).json({
+      success: false,
+      error: `Paket soal dengan ID "${newExam.packageId}" tidak ditemukan. Silakan pilih paket soal yang valid.`
+    });
+  }
+
+  // Selaraskan metadata ujian dengan paket yang dipilih
+  newExam.packageTitle = pkg.title;
+  newExam.category = pkg.category;
+  newExam.packageVersion = pkg.version || 1;
+  newExam.durationMinutes = newExam.durationMinutes || pkg.durationMinutes || 60;
+  
+  // Kunci snapshot butir soal pada saat ujian dijadwalkan
+  if (!newExam.questionSnapshot || newExam.questionSnapshot.length === 0) {
+    newExam.questionSnapshot = Array.isArray(pkg.questions) ? JSON.parse(JSON.stringify(pkg.questions)) : [];
+  }
+
   db.exams.unshift(newExam);
   saveDb();
+  console.log(`[Exams] Ujian baru dibuat: "${newExam.title}" (Paket: "${pkg.title}", ${newExam.questionSnapshot.length} soal)`);
   res.json({ success: true, exam: newExam });
 });
 
-app.put("/api/exams/:id", (req: Request, res: Response) => {
+app.put("/api/exams/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updatedExam: Exam = req.body;
-  db.exams = db.exams.map((e) => (e.id === id ? updatedExam : e));
+  const existingIdx = db.exams.findIndex(e => e.id === id);
+  if (existingIdx < 0) {
+    return res.status(404).json({ success: false, error: "Ujian tidak ditemukan." });
+  }
+
+  const existingExam = db.exams[existingIdx];
+  const pkg = db.packages?.find(p => p.id === updatedExam.packageId);
+  if (pkg) {
+    updatedExam.packageTitle = pkg.title;
+    updatedExam.category = pkg.category;
+    updatedExam.packageVersion = pkg.version || 1;
+    // Jika paket diganti atau snapshot belum ada, perbarui snapshot butir soal
+    if (existingExam.packageId !== updatedExam.packageId || !updatedExam.questionSnapshot || updatedExam.questionSnapshot.length === 0) {
+      updatedExam.questionSnapshot = Array.isArray(pkg.questions) ? JSON.parse(JSON.stringify(pkg.questions)) : [];
+      console.log(`[Exams] Paket ujian "${updatedExam.title}" diperbarui ke "${pkg.title}" (${updatedExam.questionSnapshot.length} soal)`);
+    }
+  }
+
+  db.exams[existingIdx] = updatedExam;
   saveDb();
   res.json({ success: true, exam: updatedExam });
 });
 
-app.delete("/api/exams/:id", (req: Request, res: Response) => {
+app.delete("/api/exams/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   db.exams = db.exams.filter((e) => e.id !== id);
@@ -780,100 +1276,667 @@ app.delete("/api/exams/:id", (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// CRUD - Submissions (Hasil Ujian Siswa)
+// Submissions & Draft Endpoints (Terpisah, Paginasi, Idempoten, Bebas Base64)
 // -------------------------------------------------------------
-app.post("/api/submissions", (req: Request, res: Response) => {
+
+// Helper untuk mengekstrak Base64 dari submission ke disk
+function extractEvidenceBase64FromSubmission(submission: ExamSubmission): void {
+  const processItem = (ev: any) => {
+    if (!ev || !ev.fileData || typeof ev.fileData !== "string") return;
+    if (!ev.fileData.startsWith("data:") && ev.fileData.length < 500) return;
+
+    try {
+      const base64Data = ev.fileData.replace(/^data:[^;]+;base64,/, "");
+      const buffer = Buffer.from(base64Data, "base64");
+      const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+
+      const isAudio = ev.modalityType === "audio" || (ev.mimeType && ev.mimeType.includes("audio"));
+      const isHandwriting = ev.modalityType === "handwriting" || (ev.mimeType && ev.mimeType.includes("image"));
+      const ext = path.extname(ev.fileName || "") || (isAudio ? ".webm" : isHandwriting ? ".jpg" : ".pdf");
+      const safeBase = path.basename(ev.fileName || "evidence", ext).replace(/[^a-zA-Z0-9_-]/g, "_");
+      const storedFileName = `${ev.id || Date.now()}_${hash.substring(0, 10)}_${safeBase}${ext}`;
+      const filePath = path.join(EVIDENCE_STORAGE_DIR, storedFileName);
+
+      if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, buffer);
+      }
+
+      ev.storageUrl = `/api/evidence/file/${storedFileName}`;
+      ev.storagePath = filePath;
+      ev.fileHash = hash;
+      ev.previewUrl = ev.storageUrl;
+      ev.isArchived = true;
+      delete ev.fileData; // Hapus Base64 dari submission
+    } catch (err) {
+      console.warn(`[Submissions] Gagal mengekstrak berkas Base64 untuk bukti ${ev.id}:`, err);
+    }
+  };
+
+  if (Array.isArray(submission.evidences)) {
+    submission.evidences.forEach(processItem);
+  }
+  if (submission.answers && typeof submission.answers === "object") {
+    Object.values(submission.answers).forEach((ans: any) => {
+      if (Array.isArray(ans?.multimodalEvidences)) {
+        ans.multimodalEvidences.forEach(processItem);
+      }
+    });
+  }
+}
+
+// 1. GET /api/submissions: Daftar Ringkasan dengan Paginasi & Filtering (WAJIB AUTH)
+app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  const submission: ExamSubmission = req.body;
-  const idx = db.submissions.findIndex((s) => s.id === submission.id);
-  if (idx >= 0) {
-    db.submissions[idx] = submission;
-  } else {
-    db.submissions.unshift(submission);
+  let list = [...(db.submissions || [])];
+
+  const { page = "1", limit = "20", examId, studentId, schoolName, status, search } = req.query;
+
+  // Isolasi data: Siswa HANYA dapat melihat data submission miliknya sendiri
+  if (req.user?.role === "siswa") {
+    list = list.filter(s =>
+      s.studentId === req.user?.userId ||
+      (req.user?.identityNo && s.studentNis === req.user.identityNo) ||
+      (req.user?.email && (s as any).studentEmail?.toLowerCase() === req.user.email.toLowerCase()) ||
+      (req.user?.name && s.studentName?.toLowerCase() === req.user.name.toLowerCase())
+    );
+  } else if (req.user?.role === "guru") {
+    // Guru hanya melihat submission sekolah / kelas binaannya
+    const isSchoolMatch = (s1?: string, s2?: string) => {
+      if (!s1 || !s2) return false;
+      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
+    };
+    list = list.filter(s => {
+      const matchSchool = (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
+        (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName));
+      const matchClass = req.user?.className && s.className && s.className.toLowerCase() === req.user.className.toLowerCase();
+      return matchSchool || matchClass;
+    });
   }
 
-  // Update completed student count in exam
-  db.exams = db.exams.map((e) => {
-    if (e.id === submission.examId) {
-      return { ...e, completedStudents: (e.completedStudents || 0) + 1 };
-    }
-    return e;
+  // Filter query params
+  if (examId) list = list.filter(s => s.examId === examId);
+  if (studentId && req.user?.role !== "siswa") list = list.filter(s => s.studentId === studentId);
+  if (schoolName && req.user?.role === "admin") list = list.filter(s => s.schoolName?.toLowerCase() === String(schoolName).toLowerCase());
+  if (status) list = list.filter(s => s.status === status);
+  if (search) {
+    const q = String(search).toLowerCase();
+    list = list.filter(s =>
+      s.studentName?.toLowerCase().includes(q) ||
+      s.studentNis?.toLowerCase().includes(q) ||
+      s.examTitle?.toLowerCase().includes(q)
+    );
+  }
+
+  const p = Math.max(1, parseInt(String(page), 10) || 1);
+  const l = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
+  const total = list.length;
+  const totalPages = Math.ceil(total / l);
+  const startIdx = (p - 1) * l;
+  const pagedItems = list.slice(startIdx, startIdx + l);
+
+  // Proyeksi ringan: hilangkan string Base64 & answers berat dari daftar
+  const sanitizedList = pagedItems.map(s => {
+    const { answers, evidences, ...light } = s;
+    const cleanEvs = Array.isArray(evidences)
+      ? evidences.map(ev => {
+          const { fileData, ...clean } = ev;
+          return clean;
+        })
+      : [];
+    return {
+      ...light,
+      evidences: cleanEvs,
+      evidenceCount: cleanEvs.length,
+    };
   });
+
+  res.json({
+    success: true,
+    page: p,
+    limit: l,
+    total,
+    totalPages,
+    submissions: sanitizedList,
+  });
+});
+
+// 2. GET /api/submissions/:id: Detail Lengkap 1 Submission (WAJIB AUTH & CEK OTORISASI)
+app.get("/api/submissions/:id", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { id } = req.params;
+  const sub = (db.submissions || []).find(s => s.id === id);
+
+  if (!sub) {
+    return res.status(404).json({ success: false, error: "Submission hasil ujian tidak ditemukan." });
+  }
+
+  // Otorisasi Kepemilikan Data: Siswa dilarang melihat data siswa lain
+  if (req.user?.role === 'siswa') {
+    const isOwner = sub.studentId === req.user.userId ||
+      (req.user.identityNo && sub.studentNis === req.user.identityNo) ||
+      (req.user.email && (sub as any).studentEmail?.toLowerCase() === req.user.email.toLowerCase()) ||
+      (req.user.name && sub.studentName?.toLowerCase() === req.user.name.toLowerCase());
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Anda tidak memiliki wewenang untuk melihat data siswa lain.",
+        code: "FORBIDDEN"
+      });
+    }
+  } else if (req.user?.role === 'guru') {
+    const isSchoolMatch = (s1?: string, s2?: string) => {
+      if (!s1 || !s2) return false;
+      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
+    };
+    const matchSchool = (req.user.schoolId && sub.schoolId === req.user.schoolId) ||
+      (req.user.schoolName && isSchoolMatch(sub.schoolName, req.user.schoolName));
+    if (!matchSchool) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Hasil ujian ini berada di luar kewenangan sekolah Anda.",
+        code: "FORBIDDEN"
+      });
+    }
+  }
+
+  // Bersihkan Base64 jika masih ada
+  extractEvidenceBase64FromSubmission(sub);
+
+  res.json({
+    success: true,
+    submission: sub,
+  });
+});
+
+// 3. POST /api/exams/:id/draft: Simpan Draft Jawaban Siswa di Server (WAJIB AUTH)
+app.post("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb() as any;
+  const { id: examId } = req.params;
+  const studentId = req.user?.role === 'siswa' ? req.user.userId : (req.body.studentId || req.user?.userId);
+  const studentNis = req.user?.role === 'siswa' ? (req.user.identityNo || req.body.studentNis) : req.body.studentNis;
+  const answers = req.body.answers || req.body.draftData || {};
+  const currentQuestionIndex = req.body.currentQuestionIndex || 0;
+
+  const draftKey = `${examId}_${studentId || studentNis || 'anon'}`;
+  db.drafts = db.drafts || {};
+  const draftRecord = {
+    examId,
+    studentId,
+    studentNis,
+    answers,
+    draftData: answers,
+    currentQuestionIndex,
+    updatedAt: new Date().toISOString(),
+  };
+  db.drafts[draftKey] = draftRecord;
+
+  res.json({ success: true, savedAt: draftRecord.updatedAt, draft: draftRecord, data: draftRecord });
+});
+
+// 4. GET /api/exams/:id/draft: Ambil Draft Jawaban Siswa dari Server (WAJIB AUTH)
+app.get("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb() as any;
+  const { id: examId } = req.params;
+  
+  if (req.user?.role === 'siswa') {
+    const requestedNis = req.query.studentNis as string | undefined;
+    const requestedId = req.query.studentId as string | undefined;
+    if (requestedNis && requestedNis !== req.user.identityNo && requestedNis !== req.user.userId) {
+      return res.status(403).json({ success: false, error: "Akses ditolak: Anda tidak dapat mengakses draft ujian siswa lain." });
+    }
+    if (requestedId && requestedId !== req.user.userId && requestedId !== req.user.identityNo) {
+      return res.status(403).json({ success: false, error: "Akses ditolak: Anda tidak dapat mengakses draft ujian siswa lain." });
+    }
+  }
+
+  // Siswa strictly hanya dapat mengambil draft dirinya sendiri
+  const studentKey = req.user?.role === 'siswa'
+    ? (req.user.userId || req.user.identityNo)
+    : (req.query.studentId || req.query.studentNis || req.user?.userId);
+
+  if (!studentKey) {
+    return res.json({ success: false, draft: null, data: null });
+  }
+
+  const draftKey = `${examId}_${studentKey}`;
+  const draft = db.drafts?.[draftKey] || null;
+
+  res.json({ success: true, draft, data: draft });
+});
+
+// Helper: Validasi dan Kalkulasi Nilai di Server (Anti-Manipulasi Nilai & Anti-Manipulasi Rubrik oleh Browser)
+export function evaluateSubmissionServerSide(submission: ExamSubmission, canonicalQuestions: QuestionItem[]): void {
+  const isEmployability =
+    submission.packageId === 'pkg-employability-18' ||
+    submission.packageTitle?.toLowerCase().includes('employability') ||
+    submission.packageTitle?.toLowerCase().includes('non-tes') ||
+    canonicalQuestions.some(q => (q as any).scoringMap);
+
+  let totalRawScore = 0;
+  let maxRawScore = 0;
+  let autoScoreTotal = 0;
+  let essayScoreTotal = 0;
+
+  const enrichedAnswers: Record<string, StudentAnswer> = {};
+
+  canonicalQuestions.forEach((q, idx) => {
+    const qAns = submission.answers?.[q.id] ||
+      submission.answers?.[`q-${idx + 1}`] ||
+      submission.answers?.[`q-0${idx + 1}`] ||
+      submission.answers?.[`q-${String(idx + 1).padStart(2, '0')}`] ||
+      submission.answers?.[String(idx + 1)] ||
+      { questionId: q.id };
+    const qMax = q.maxScore || (q.points || 1);
+    maxRawScore += qMax;
+
+    let earnedScore = 0;
+
+    if (q.type === 'multiple_choice') {
+      const scoringMap = (q as any).scoringMap;
+      const studentPick = (qAns.selectedOption || '').toString().trim().toUpperCase();
+
+      if (scoringMap) {
+        // Likert scale 1-5 untuk instrumen non-tes employability
+        let letter = '';
+        if (['A', 'B', 'C', 'D', 'E'].includes(studentPick)) {
+          letter = studentPick;
+        } else {
+          const match = studentPick.match(/^([A-E])\b/);
+          if (match) letter = match[1];
+          else if (studentPick.startsWith('A')) letter = 'A';
+          else if (studentPick.startsWith('B')) letter = 'B';
+          else if (studentPick.startsWith('C')) letter = 'C';
+          else if (studentPick.startsWith('D')) letter = 'D';
+          else if (studentPick.startsWith('E')) letter = 'E';
+        }
+        earnedScore = letter && scoringMap[letter] !== undefined ? scoringMap[letter] : 0;
+      } else {
+        // Pilihan Ganda Teknis Biner
+        const correctPick = (q.correctAnswer || '').toString().trim().toUpperCase();
+        earnedScore = (studentPick && (studentPick === correctPick || studentPick.slice(0, 1) === correctPick.slice(0, 1))) ? (q.points || 1) : 0;
+      }
+      autoScoreTotal += earnedScore;
+    } else if (q.type === 'complex_mcq') {
+      if (Array.isArray(qAns.selectedOptions)) {
+        const studentLetters = qAns.selectedOptions.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
+        const correctLetters = (q.correctAnswers || []).map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
+        let matchCount = 0;
+        studentLetters.forEach((letter: string) => {
+          if (correctLetters.includes(letter)) matchCount++;
+        });
+        const ratio = correctLetters.length > 0 ? matchCount / correctLetters.length : 0;
+        earnedScore = Math.round(ratio * qMax);
+      } else if (q.statements && qAns.complexAnswers) {
+        let correctCount = 0;
+        q.statements.forEach(stmt => {
+          if (qAns.complexAnswers && qAns.complexAnswers[stmt.id] === stmt.correctAnswer) correctCount++;
+        });
+        earnedScore = Math.round((correctCount / q.statements.length) * qMax);
+      }
+      autoScoreTotal += earnedScore;
+    } else if (q.type === 'matching' && q.matchingColumnA) {
+      let correctCount = 0;
+      q.matchingColumnA.forEach(m => {
+        const studentVal = (qAns.matchingAnswers && qAns.matchingAnswers[m.id] || '').trim();
+        const targetVal = (m.correctMatch || '').trim();
+        if (studentVal && (studentVal === targetVal || studentVal.slice(0, 1) === targetVal.slice(0, 1))) correctCount++;
+      });
+      earnedScore = correctCount;
+      autoScoreTotal += earnedScore;
+    } else if (q.type === 'short_answer') {
+      const val = (qAns.shortAnswerText || '').toString().trim().replace(',', '.');
+      const calc = (qAns.shortAnswerCalculation || '').toString().toLowerCase();
+
+      if (q.shortAnswerKey && (val.toLowerCase() === q.shortAnswerKey.toLowerCase() || (q.shortAnswerKey2 && val.toLowerCase() === q.shortAnswerKey2.toLowerCase()))) {
+        earnedScore = qMax;
+      } else if (val || calc) {
+        earnedScore = Math.max(1, Math.round(qMax * 0.3));
+      } else {
+        earnedScore = 0;
+      }
+      autoScoreTotal += earnedScore;
+    } else if (q.type === 'essay') {
+      const textToEval = (qAns.essayAnswer || '').trim();
+      const hasEvidence = qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0;
+      if (textToEval || hasEvidence) {
+        const proposedScore = typeof qAns.score === 'number' ? qAns.score : Math.round(qMax * 0.75);
+        earnedScore = Math.min(qMax, Math.max(0, proposedScore));
+      } else {
+        earnedScore = 0;
+      }
+      essayScoreTotal += earnedScore;
+    } else {
+      earnedScore = Math.min(qMax, Math.max(0, qAns.score || 0));
+    }
+
+    totalRawScore += earnedScore;
+    enrichedAnswers[q.id] = {
+      ...qAns,
+      score: Math.min(qMax, Math.max(0, earnedScore)),
+      maxScore: qMax
+    };
+  });
+
+  submission.answers = enrichedAnswers;
+  submission.autoScore = autoScoreTotal;
+  submission.essayScore = essayScoreTotal;
+
+  // Skor persentase akhir dihitung ketat di server (MENGABAIKAN totalScore kiriman browser!)
+  const finalPercentage = maxRawScore > 0 ? Math.round((totalRawScore / maxRawScore) * 100) : 0;
+  submission.totalScore = finalPercentage;
+
+  if (isEmployability) {
+    submission.employabilityScore = finalPercentage;
+    submission.technicalScore = 0;
+  } else {
+    submission.technicalScore = finalPercentage;
+    submission.employabilityScore = 0;
+  }
+}
+
+// 5. POST /api/submissions: Pengumpulan Ujian Idempoten (Anti-Duplikasi, Anti-Base64, Anti-Penimpaan)
+app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const submission: ExamSubmission = req.body;
+
+  if (!submission || !submission.examId) {
+    return res.status(400).json({ success: false, error: "Data submission tidak valid." });
+  }
+
+  // 1. Validasi jadwal ujian di database
+  let exam = db.exams?.find(e => e.id === submission.examId);
+  if (!exam) {
+    const pkg = db.packages?.find(p => p.id === submission.packageId) || db.packages?.[0];
+    if (pkg) {
+      exam = {
+        id: submission.examId,
+        title: submission.examTitle || pkg.title,
+        packageId: pkg.id,
+        packageTitle: pkg.title,
+        category: pkg.category,
+        durationMinutes: pkg.durationMinutes || 60,
+        questionSnapshot: pkg.questions,
+        status: 'berjalan'
+      } as any;
+      if (!db.exams) db.exams = [];
+      db.exams.push(exam);
+      saveDb();
+    } else {
+      return res.status(404).json({ success: false, error: "Jadwal ujian tidak ditemukan." });
+    }
+  }
+
+  // 2. Otorisasi Akses Siswa: Periksa apakah siswa berhak mengumpulkan ujian ini
+  if (req.user && req.user.role === 'siswa') {
+    submission.studentId = req.user.userId;
+    submission.studentName = req.user.name;
+    submission.studentEmail = req.user.email;
+    if (req.user.identityNo) submission.studentNis = req.user.identityNo;
+    if (req.user.schoolId) submission.schoolId = req.user.schoolId;
+    if (req.user.schoolName) submission.schoolName = req.user.schoolName;
+    if (req.user.classId) submission.classId = req.user.classId;
+    if (req.user.className) submission.className = req.user.className;
+
+    const studentClassId = req.user.classId?.trim();
+    const studentClassName = req.user.className?.toLowerCase()?.trim();
+    const studentSchoolId = req.user.schoolId?.trim();
+    const studentSchoolName = req.user.schoolName?.toLowerCase()?.trim();
+    const examClassId = exam.classId?.trim();
+    const examClassName = exam.className?.toLowerCase()?.trim();
+    const examSchoolId = exam.schoolId?.trim();
+    const examSchoolName = exam.schoolName?.toLowerCase()?.trim();
+
+    let isClassMatch = true;
+    if (examClassId || examClassName) {
+      if (examClassId && studentClassId && examClassId === studentClassId) {
+        isClassMatch = true;
+      } else if (examClassName && studentClassName && (
+        examClassName === studentClassName ||
+        examClassName.includes(studentClassName) ||
+        studentClassName.includes(examClassName)
+      )) {
+        isClassMatch = true;
+      } else {
+        isClassMatch = false;
+      }
+    }
+
+    let isSchoolMatch = true;
+    if (examSchoolId || examSchoolName) {
+      if (examSchoolId && studentSchoolId && examSchoolId === studentSchoolId) {
+        isSchoolMatch = true;
+      } else if (examSchoolName && studentSchoolName && (
+        examSchoolName === studentSchoolName ||
+        examSchoolName.includes(studentSchoolName) ||
+        studentSchoolName.includes(examSchoolName)
+      )) {
+        isSchoolMatch = true;
+      } else {
+        isSchoolMatch = false;
+      }
+    }
+
+    if (!isClassMatch || !isSchoolMatch) {
+      return res.status(403).json({
+        success: false,
+        error: `Akses ditolak: Anda tidak terdaftar pada kelas ujian "${exam.title}".`,
+        code: "FORBIDDEN"
+      });
+    }
+  }
+
+  // 3. Kunci snapshot tepercaya dari server & larang manipulasi packageId/version dari browser
+  submission.packageId = exam.packageId;
+  submission.packageTitle = exam.packageTitle;
+  submission.packageVersion = exam.packageVersion || 1;
+  if (!submission.schoolId && exam.schoolId) submission.schoolId = exam.schoolId;
+  if (!submission.schoolName && exam.schoolName) submission.schoolName = exam.schoolName;
+  if (!submission.classId && exam.classId) submission.classId = exam.classId;
+  if (!submission.className && exam.className) submission.className = exam.className;
+
+  let canonicalQuestions: QuestionItem[] = [];
+  if (Array.isArray(exam.questionSnapshot) && exam.questionSnapshot.length > 0) {
+    canonicalQuestions = exam.questionSnapshot;
+  } else {
+    const pkg = db.packages?.find(p => p.id === exam.packageId);
+    if (pkg?.questions && pkg.questions.length > 0) {
+      canonicalQuestions = pkg.questions;
+    }
+  }
+  submission.questionSnapshot = JSON.parse(JSON.stringify(canonicalQuestions));
+
+  // 4. Kalkulasi dan validasi nilai di server secara independen (JANGAN percaya totalScore browser!)
+  evaluateSubmissionServerSide(submission, canonicalQuestions);
+
+  // Amankan berkas multimodal ke disk fisik (hapus Base64)
+  extractEvidenceBase64FromSubmission(submission);
+
+  // Kunci Idempoten: Cek apakah submission untuk (examId, studentId) atau (examId, studentNis) sudah ada
+  const existingIdx = db.submissions.findIndex(s =>
+    s.id === submission.id ||
+    (s.examId === submission.examId && (
+      (s.studentId && s.studentId === submission.studentId) ||
+      (s.studentNis && submission.studentNis && s.studentNis === submission.studentNis)
+    ))
+  );
+
+  let isFirstSubmission = false;
+
+  if (existingIdx >= 0) {
+    const existing = db.submissions[existingIdx];
+    const isCompleted = existing.status === 'dinilai' || existing.status === 'perlu_pemeriksaan';
+    const isStudent = req.user?.role === 'siswa';
+
+    // Mencegah penimpaan tidak sengaja dari submission final yang sudah dinilai/lengkap
+    const isExplicitNewAttempt = Boolean(
+      (submission.attemptNumber && submission.attemptNumber > (existing.attemptNumber || 1)) ||
+      (submission as any).allowRetake === true ||
+      (exam as any).allowRetake === true
+    );
+
+    if (isCompleted && !isExplicitNewAttempt) {
+      console.log(`[Submissions] Submission sudah final untuk ${submission.studentName}. Menolak penimpaan tidak sengaja.`);
+      return res.json({
+        success: true,
+        submission: existing,
+        message: "Ujian Anda sudah tercatat dan dinilai. Hasil final tidak ditimpa oleh percobaan ulang."
+      });
+    }
+
+    if (isExplicitNewAttempt) {
+      isFirstSubmission = true;
+      submission.attemptNumber = submission.attemptNumber || (existing.attemptNumber ? existing.attemptNumber + 1 : 2);
+      submission.id = `${submission.id}-att-${submission.attemptNumber}`;
+      db.submissions.unshift(submission);
+      console.log(`[Submissions] Attempt ujian baru tersimpan: ${submission.studentName} (Attempt ${submission.attemptNumber})`);
+    } else {
+      const oldId = db.submissions[existingIdx].id;
+      db.submissions[existingIdx] = {
+        ...db.submissions[existingIdx],
+        ...submission,
+        id: oldId,
+      };
+      submission.id = oldId;
+      console.log(`[Submissions] Update idempoten untuk siswa ${submission.studentName} pada ujian ${submission.examId}`);
+    }
+  } else {
+    // INSERT Pertama Kali
+    isFirstSubmission = true;
+    db.submissions.unshift(submission);
+    console.log(`[Submissions] Submission baru tersimpan: ${submission.studentName} pada ujian ${submission.examId}`);
+  }
+
+  // Update completed student count in exam HANYA JIKA first submission
+  if (isFirstSubmission) {
+    db.exams = db.exams.map((e) => {
+      if (e.id === submission.examId) {
+        return { ...e, completedStudents: (e.completedStudents || 0) + 1 };
+      }
+      return e;
+    });
+  }
+
+  // Hapus draft server setelah ujian resmi terkumpul
+  const draftKey = `${submission.examId}_${submission.studentId || submission.studentNis}`;
+  if ((db as any).drafts && (db as any).drafts[draftKey]) {
+    delete (db as any).drafts[draftKey];
+  }
 
   saveDb();
   res.json({ success: true, submission });
 });
 
-app.put("/api/submissions/:id", (req: Request, res: Response) => {
+app.put("/api/submissions/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updated: ExamSubmission = req.body;
+
+  extractEvidenceBase64FromSubmission(updated);
+
   const idx = db.submissions.findIndex((s) => s.id === id);
   if (idx >= 0) {
-    db.submissions[idx] = updated;
+    db.submissions[idx] = { ...db.submissions[idx], ...updated };
   } else {
     db.submissions.unshift(updated);
   }
   saveDb();
-  res.json({ success: true, submission: updated });
+  res.json({ success: true, submission: db.submissions[idx >= 0 ? idx : 0] });
 });
 
 // -------------------------------------------------------------
-// Settings & Reset
+// Settings & Reset (HANYA ADMIN)
 // -------------------------------------------------------------
-app.put("/api/settings", (req: Request, res: Response) => {
+app.put("/api/settings", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newSettings: SystemSettings = req.body;
   db.settings = { ...db.settings, ...newSettings };
   saveDb();
-  res.json({ success: true, settings: db.settings });
+  res.json({ success: true, settings: sanitizeSettings(db.settings) });
 });
 
 // -------------------------------------------------------------
 // Portfolios & Laporan Praktikum CRUD
 // -------------------------------------------------------------
-app.get("/api/portfolios", (_req: Request, res: Response) => {
+app.get("/api/portfolios", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  res.json({ success: true, portfolios: db.portfolios || [] });
+  const allPortfolios = db.portfolios || [];
+  if (!req.user) {
+    return res.json({ success: true, portfolios: [] });
+  }
+
+  if (req.user.role === "siswa") {
+    const studentId = req.user.id;
+    const studentNis = req.user.identityNo;
+    const filtered = allPortfolios.filter(p => p.studentId === studentId || (studentNis && p.studentId === studentNis));
+    return res.json({ success: true, portfolios: filtered });
+  }
+
+  if (req.user.role === "guru") {
+    const teacher = db.teachers.find(t => t.id === req.user?.id || t.email.toLowerCase() === req.user?.email.toLowerCase());
+    const schoolId = teacher?.schoolId;
+    const studentIdsInSchool = new Set(db.users.filter(u => u.role === "siswa" && (!schoolId || u.schoolId === schoolId)).map(u => u.id));
+    const filtered = allPortfolios.filter(p => studentIdsInSchool.has(p.studentId));
+    return res.json({ success: true, portfolios: filtered });
+  }
+
+  res.json({ success: true, portfolios: allPortfolios });
 });
 
-app.post("/api/portfolios", (req: Request, res: Response) => {
+app.post("/api/portfolios", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  const item: PortfolioItem = req.body;
+  const item: PortfolioItem = { ...req.body };
+  if (req.user && req.user.role === "siswa") {
+    item.studentId = req.user.id;
+  }
   if (!Array.isArray(db.portfolios)) db.portfolios = [];
   db.portfolios = [item, ...db.portfolios.filter(p => p.id !== item.id)];
   saveDb();
   res.json({ success: true, portfolio: item });
 });
 
-app.put("/api/portfolios/:id", (req: Request, res: Response) => {
+app.put("/api/portfolios/:id", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   const updated: PortfolioItem = req.body;
   if (!Array.isArray(db.portfolios)) db.portfolios = [];
   const idx = db.portfolios.findIndex(p => p.id === id);
+
   if (idx >= 0) {
+    if (req.user && req.user.role === "siswa" && db.portfolios[idx].studentId !== req.user.id && db.portfolios[idx].studentId !== req.user.identityNo) {
+      return res.status(403).json({ success: false, error: "Akses ditolak: Anda tidak dapat mengubah portofolio siswa lain." });
+    }
     db.portfolios[idx] = updated;
   } else {
+    if (req.user && req.user.role === "siswa") {
+      updated.studentId = req.user.id;
+    }
     db.portfolios.unshift(updated);
   }
   saveDb();
   res.json({ success: true, portfolio: updated });
 });
 
-app.delete("/api/portfolios/:id", (req: Request, res: Response) => {
+app.delete("/api/portfolios/:id", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const { id } = req.params;
   if (Array.isArray(db.portfolios)) {
+    const existing = db.portfolios.find(p => p.id === id);
+    if (existing && req.user && req.user.role === "siswa" && existing.studentId !== req.user.id && existing.studentId !== req.user.identityNo) {
+      return res.status(403).json({ success: false, error: "Akses ditolak: Anda tidak dapat menghapus portofolio siswa lain." });
+    }
     db.portfolios = db.portfolios.filter(p => p.id !== id);
     saveDb();
   }
   res.json({ success: true });
 });
 
-app.post("/api/reset-data", (_req: Request, res: Response) => {
+app.post("/api/reset-data", requireAuth, requireRole("admin"), (_req: AuthenticatedRequest, res: Response) => {
   const db = resetDb();
-  res.json({ success: true, message: "Database berhasil direset ke data default awal.", data: db });
+  res.json({ success: true, message: "Data berhasil direset oleh Administrator." });
 });
 
 // -------------------------------------------------------------
@@ -1403,6 +2466,10 @@ app.post("/api/ai/grade-exam-batch/:examId", async (req: Request, res: Response)
   }
 
   const pkg = db.packages.find(p => p.id === exam.packageId);
+  const examQuestions: QuestionItem[] = (Array.isArray(exam.questionSnapshot) && exam.questionSnapshot.length > 0)
+    ? exam.questionSnapshot
+    : (pkg?.questions || []);
+
   const submissions = db.submissions.filter(s => s.examId === examId);
 
   if (submissions.length === 0) {
@@ -1428,8 +2495,13 @@ app.post("/api/ai/grade-exam-batch/:examId", async (req: Request, res: Response)
         let essayScore = 0;
         const essayEvaluations: any = {};
 
+        // Gunakan snapshot butir soal spesifik submission jika ada, atau snapshot ujian/paket
+        const activeSubQuestions: QuestionItem[] = (Array.isArray(sub.questionSnapshot) && sub.questionSnapshot.length > 0)
+          ? sub.questionSnapshot
+          : examQuestions;
+
         for (const [qId, ans] of Object.entries(sub.answers || {})) {
-          const question = pkg?.questions.find(q => q.id === qId) || REVISED_QUESTIONS_24.find(q => q.id === qId);
+          const question = activeSubQuestions.find(q => q.id === qId);
           if (!question) continue;
 
           // ── Soal otomatis (pilgan, kompleks, menjodohkan) ──
@@ -1914,17 +2986,17 @@ Berikan JSON:
 // -------------------------------------------------------------
 app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Response) => {
   try {
-    const {
-      evidenceId,
-      modalityType,
-      fileName,
-      fileData,
-      questionId,
-      studentNis,
-      studentName,
-      uploadTime,
-      saveOnly
-    } = req.body;
+    const rawEv = req.body.evidence || {};
+    const evidenceId = req.body.evidenceId || rawEv.id;
+    const modalityType = req.body.modalityType || rawEv.modalityType;
+    const fileName = req.body.fileName || rawEv.fileName;
+    const fileData = req.body.fileData || rawEv.fileData;
+    const questionId = req.body.questionId || rawEv.questionId;
+    const studentNis = req.body.studentNis || rawEv.studentNis;
+    const studentName = req.body.studentName || rawEv.studentName;
+    const uploadTime = req.body.uploadTime || rawEv.uploadTime;
+    const audioDurationSeconds = req.body.audioDurationSeconds !== undefined ? req.body.audioDurationSeconds : rawEv.audioDurationSeconds;
+    const saveOnly = req.body.saveOnly !== undefined ? req.body.saveOnly : true;
 
     const isAudio = modalityType === "audio";
     const isHandwriting = modalityType === "handwriting";
@@ -1970,11 +3042,12 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
         fileName: fileName || `Bukti_${modalityType}`,
         fileSize: fileData ? Math.round((fileData.length * 3) / 4) : 45000,
         mimeType: isAudio ? "audio/webm" : isHandwriting ? "image/jpeg" : "application/pdf",
-        fileData: fileData || undefined,
-        previewUrl: storageUrl || fileData || undefined,
+        fileData: undefined, // Hapus Base64 dari respons; klien cukup memakai storageUrl
+        previewUrl: storageUrl || undefined,
         storageUrl,
         storagePath,
         fileHash,
+        audioDurationSeconds,
         isArchived: !!storageUrl,
         extractedText: req.body.extractedText || undefined,
         extractionStatus: hasText ? "completed" : "saved",
@@ -2012,6 +3085,7 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
     };
 
     const processedEvidence = await extractMultimodalEvidenceItem(initialEvidence);
+    delete processedEvidence.fileData; // Hapus Base64 dari objek hasil ekstraksi
 
     res.json({
       success: true,
@@ -2040,6 +3114,11 @@ app.post("/api/ai/evaluate-submission/:submissionId", async (req: Request, res: 
     const sub = db.submissions[subIdx];
     const exam = db.exams.find(e => e.id === sub.examId);
     const pkg = db.packages.find(p => p.id === exam?.packageId);
+    const subQuestions: QuestionItem[] = (Array.isArray(sub.questionSnapshot) && sub.questionSnapshot.length > 0)
+      ? sub.questionSnapshot
+      : ((Array.isArray(exam?.questionSnapshot) && exam.questionSnapshot.length > 0)
+        ? exam.questionSnapshot
+        : (pkg?.questions || []));
 
     const ESSAY_TYPES = ['essay', 'short_answer', 'essay_subquestions', 'scenario_assessment'];
     let autoScore = sub.autoScore || 0;
@@ -2048,7 +3127,7 @@ app.post("/api/ai/evaluate-submission/:submissionId", async (req: Request, res: 
     const updatedAnswers = { ...(sub.answers || {}) };
 
     for (const [qId, ans] of Object.entries(updatedAnswers)) {
-      const question = pkg?.questions.find(q => q.id === qId) || REVISED_QUESTIONS_24.find(q => q.id === qId);
+      const question = subQuestions.find(q => q.id === qId);
       if (!question) continue;
 
       if (!ESSAY_TYPES.includes(question.type)) {
@@ -2278,12 +3357,15 @@ app.get("/api/evidence/file/:filename", (req: Request, res: Response) => {
     };
 
     const contentType = mimeMap[ext] || "application/octet-stream";
-    res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "public, max-age=86400"); // Cacheable for audit verification
     res.setHeader("X-Audit-Traceable", "true");
 
-    const stream = fs.createReadStream(filePath);
-    stream.pipe(res);
+    res.sendFile(filePath, {
+      acceptRanges: true,
+      headers: {
+        "Content-Type": contentType,
+      }
+    });
   } catch (err: any) {
     console.error("Error serving evidence file:", err);
     res.status(500).json({ success: false, error: "Gagal membaca berkas bukti dari repositori arsip." });
@@ -2315,8 +3397,50 @@ app.get("/api/evidence/audit/:evidenceId", (req: Request, res: Response) => {
       if (matchedEvidence) break;
     }
 
+    // Periksa juga di db.drafts jika belum dikumpulkan
+    if (!matchedEvidence && db.drafts) {
+      for (const draft of Object.values(db.drafts) as any[]) {
+        if (draft.answers) {
+          for (const ans of Object.values(draft.answers) as any[]) {
+            if (ans.multimodalEvidences) {
+              matchedEvidence = ans.multimodalEvidences.find((e: any) => e.id === evidenceId);
+              if (matchedEvidence) break;
+            }
+          }
+        }
+        if (matchedEvidence) break;
+      }
+    }
+
+    // Periksa langsung ke repositori arsip penyimpanan disk jika file sudah diunggah
+    let diskFileName = "";
+    if (!matchedEvidence && fs.existsSync(EVIDENCE_STORAGE_DIR)) {
+      const files = fs.readdirSync(EVIDENCE_STORAGE_DIR);
+      diskFileName = files.find(f => f.includes(evidenceId)) || "";
+      if (diskFileName) {
+        const filePath = path.join(EVIDENCE_STORAGE_DIR, diskFileName);
+        const stat = fs.statSync(filePath);
+        const buf = fs.readFileSync(filePath);
+        const hash = crypto.createHash("sha256").update(buf).digest("hex");
+        matchedEvidence = {
+          id: evidenceId,
+          fileName: diskFileName,
+          fileSize: stat.size,
+          mimeType: diskFileName.endsWith(".webm") ? "audio/webm" : diskFileName.endsWith(".jpg") ? "image/jpeg" : "application/octet-stream",
+          studentNis: diskFileName.split("_")[1] || "NIS-RECORDED",
+          studentName: "Siswa Terdaftar",
+          uploadTime: stat.mtime.toISOString(),
+          storagePath: filePath,
+          storageUrl: `/api/evidence/file/${diskFileName}`,
+          fileHash: hash,
+          questionId: "q-14",
+          modalityType: diskFileName.endsWith(".webm") ? "audio" : "tulisan_tangan"
+        };
+      }
+    }
+
     if (!matchedEvidence) {
-      return res.status(404).json({ success: false, error: "Bukti tidak ditemukan dalam basis data." });
+      return res.status(404).json({ success: false, error: "Bukti tidak ditemukan dalam basis data maupun repositori arsip." });
     }
 
     let physicalFileExists = false;
@@ -2327,29 +3451,33 @@ app.get("/api/evidence/audit/:evidenceId", (req: Request, res: Response) => {
       calculatedHash = crypto.createHash("sha256").update(buf).digest("hex");
     }
 
+    const auditData = {
+      evidenceId: matchedEvidence.id,
+      fileName: matchedEvidence.fileName,
+      fileSize: matchedEvidence.fileSize,
+      mimeType: matchedEvidence.mimeType,
+      studentNis: matchedEvidence.studentNis,
+      studentName: matchedEvidence.studentName,
+      uploadTime: matchedEvidence.uploadTime,
+      questionId: matchedEvidence.questionId,
+      recordedHash: matchedEvidence.fileHash || null,
+      calculatedHash: calculatedHash || null,
+      integrityStatus: matchedEvidence.fileHash
+        ? matchedEvidence.fileHash === calculatedHash
+          ? "VERIFIED_PASS"
+          : "HASH_MISMATCH"
+        : physicalFileExists
+        ? "FILE_EXISTS_NO_HASH"
+        : "PENDING_VERIFICATION",
+      physicalFileExists,
+      storageUrl: matchedEvidence.storageUrl || null,
+      extractionArtifact: matchedEvidence.extractionArtifact || null
+    };
+
     res.json({
       success: true,
-      auditRecord: {
-        evidenceId: matchedEvidence.id,
-        fileName: matchedEvidence.fileName,
-        fileSize: matchedEvidence.fileSize,
-        mimeType: matchedEvidence.mimeType,
-        studentNis: matchedEvidence.studentNis,
-        studentName: matchedEvidence.studentName,
-        uploadTime: matchedEvidence.uploadTime,
-        recordedHash: matchedEvidence.fileHash || null,
-        calculatedHash: calculatedHash || null,
-        integrityStatus: matchedEvidence.fileHash
-          ? matchedEvidence.fileHash === calculatedHash
-            ? "VERIFIED_PASS"
-            : "HASH_MISMATCH"
-          : physicalFileExists
-          ? "FILE_EXISTS_NO_HASH"
-          : "PENDING_VERIFICATION",
-        physicalFileExists,
-        storageUrl: matchedEvidence.storageUrl || null,
-        extractionArtifact: matchedEvidence.extractionArtifact || null
-      }
+      auditRecord: auditData,
+      audit: auditData
     });
   } catch (err: any) {
     console.error("Error in evidence audit check:", err);

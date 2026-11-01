@@ -131,6 +131,7 @@ export interface QuestionPackage {
   totalQuestions: number;
   questions: QuestionItem[];
   isActive: boolean;
+  version?: number;
   createdAt: string;
   createdBy: string;
 }
@@ -143,6 +144,8 @@ export interface Exam {
   title: string;
   packageId: string;
   packageTitle: string;
+  packageVersion?: number;
+  questionSnapshot?: QuestionItem[];
   category: QuestionCategory;
   classId: string;
   className: string;
@@ -308,6 +311,10 @@ export interface ExamSubmission {
   id: string;
   examId: string;
   examTitle: string;
+  packageId?: string;
+  packageTitle?: string;
+  packageVersion?: number;
+  questionSnapshot?: QuestionItem[];
   studentId: string;
   studentName: string;
   studentNis: string;
@@ -317,6 +324,8 @@ export interface ExamSubmission {
   classId?: string;
   className: string;
   submitTime: string;
+  attemptNumber?: number;
+  allowRetake?: boolean;
   answers: Record<string, StudentAnswer>;
   totalScore: number;
   technicalScore: number;

@@ -120,7 +120,8 @@ export const PackageMaster: React.FC<PackageMasterProps> = ({
         code: pkgCode.trim(),
         category: pkgCategory,
         description: pkgDescription.trim(),
-        durationMinutes: pkgDuration
+        durationMinutes: pkgDuration,
+        version: (editingPkg.version || 1) + 1
       };
       onUpdatePackage(updated);
       if (selectedPackage?.id === updated.id) setSelectedPackage(updated);
@@ -135,6 +136,7 @@ export const PackageMaster: React.FC<PackageMasterProps> = ({
         totalQuestions: 0,
         questions: [],
         isActive: true,
+        version: 1,
         createdAt: new Date().toISOString().split('T')[0],
         createdBy: authorName
       };
@@ -455,7 +457,8 @@ export const PackageMaster: React.FC<PackageMasterProps> = ({
     const updatedPackage: QuestionPackage = {
       ...selectedPackage,
       questions: updatedQuestions,
-      totalQuestions: updatedQuestions.length
+      totalQuestions: updatedQuestions.length,
+      version: (selectedPackage.version || 1) + 1
     };
 
     onUpdatePackage(updatedPackage);
