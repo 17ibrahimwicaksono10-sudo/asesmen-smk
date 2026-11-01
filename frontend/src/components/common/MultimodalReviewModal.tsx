@@ -247,8 +247,13 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
       packageObj?.category === 'employability' ||
       packageObj?.id === 'pkg-employability-18' ||
       Object.keys(submission.answers || {}).some(k => k.startsWith('nt-') || k.startsWith('q-nt-'));
+
     const rawTotal = newTotal;
-    const finalScore = isEmployability ? Math.round((rawTotal / 90) * 100) : rawTotal;
+    const maxPossibleScore = packageObj?.questions?.reduce((acc, q) => acc + (q.points || q.maxScore || 1), 0)
+      || (submission.questionSnapshot?.reduce((acc: number, q: any) => acc + (q.points || q.maxScore || 1), 0))
+      || (isEmployability ? 90 : 65);
+
+    const finalScore = maxPossibleScore > 0 ? Math.round((rawTotal / maxPossibleScore) * 100) : 0;
 
     const updatedSubmission: ExamSubmission = {
       ...submission,
@@ -256,7 +261,10 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
       originalAIScoreTotal: originalAITotal,
       teacherScoreTotal: rawTotal,
       totalScore: finalScore,
-      ...(isEmployability ? { employabilityScore: finalScore } : {}),
+      technicalScore: isEmployability ? 0 : finalScore,
+      employabilityScore: isEmployability ? finalScore : 0,
+      rawScoreTotal: rawTotal,
+      maxRawScore: maxPossibleScore,
       status: action === 'return' ? 'perlu_pemeriksaan' : 'dinilai',
       validationStatus: action === 'approve' ? 'approved' : action === 'revise' ? 'revised' : 'returned',
       validatedBy: teacherName,

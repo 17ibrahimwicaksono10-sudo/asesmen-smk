@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Exam, ExamSubmission, QuestionPackage, StudentAnswer, School, ClassRoom, User, MultimodalEvidence } from '../../types';
 import { INITIAL_SCHOOLS } from '../../data/mockData';
 import { DEFAULT_EMPLOYABILITY_PACKAGE } from '../../data/nonTestInstrument';
+import { REVISED_QUESTIONS_24 } from '../../data/revisedQuestions';
 import {
   BarChart3,
   Users,
@@ -544,10 +545,20 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                     const currentExam = exams.find((e) => e.id === selectedSubmission.examId) || activeExamObj;
                     const currentPkg = packages.find((p) => p.id === currentExam?.packageId)
                       || (currentExam?.packageId === 'pkg-employability-18' || selectedSubmission.examTitle?.toLowerCase().includes('non-tes') || selectedSubmission.examTitle?.toLowerCase().includes('employability') ? DEFAULT_EMPLOYABILITY_PACKAGE : undefined);
-                    const qA = currentPkg?.questions.find((q) => q.id === aId)
-                      || DEFAULT_EMPLOYABILITY_PACKAGE.questions.find((q) => q.id === aId);
-                    const qB = currentPkg?.questions.find((q) => q.id === bId)
-                      || DEFAULT_EMPLOYABILITY_PACKAGE.questions.find((q) => q.id === bId);
+
+                    const resolveQ = (key: string) => {
+                      const num = parseInt(key.replace(/\D/g, ''), 10);
+                      return (
+                        (selectedSubmission.questionSnapshot && (selectedSubmission.questionSnapshot as any[]).find((q: any) => q.id === key || (num && q.number === num))) ||
+                        (currentExam?.questionSnapshot && (currentExam.questionSnapshot as any[]).find((q: any) => q.id === key || (num && q.number === num))) ||
+                        currentPkg?.questions.find((q) => q.id === key || (num && q.number === num)) ||
+                        REVISED_QUESTIONS_24.find((q) => q.id === key || (num && q.number === num)) ||
+                        DEFAULT_EMPLOYABILITY_PACKAGE.questions.find((q) => q.id === key || (num && q.number === num))
+                      );
+                    };
+
+                    const qA = resolveQ(aId);
+                    const qB = resolveQ(bId);
                     const numA = qA?.number ?? parseInt(aId.replace(/\D/g, ''), 10) ?? 0;
                     const numB = qB?.number ?? parseInt(bId.replace(/\D/g, ''), 10) ?? 0;
                     return numA - numB;
@@ -557,8 +568,15 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                     const currentExam = exams.find((e) => e.id === selectedSubmission.examId) || activeExamObj;
                     const currentPkg = packages.find((p) => p.id === currentExam?.packageId)
                       || (currentExam?.packageId === 'pkg-employability-18' || selectedSubmission.examTitle?.toLowerCase().includes('non-tes') || selectedSubmission.examTitle?.toLowerCase().includes('employability') ? DEFAULT_EMPLOYABILITY_PACKAGE : undefined);
-                    const qItem = currentPkg?.questions.find((q) => q.id === qKey)
-                      || DEFAULT_EMPLOYABILITY_PACKAGE.questions.find((q) => q.id === qKey);
+
+                    const qNum = parseInt(qKey.replace(/\D/g, ''), 10);
+                    const qItem = (
+                      (selectedSubmission.questionSnapshot && (selectedSubmission.questionSnapshot as any[]).find((q: any) => q.id === qKey || (qNum && q.number === qNum))) ||
+                      (currentExam?.questionSnapshot && (currentExam.questionSnapshot as any[]).find((q: any) => q.id === qKey || (qNum && q.number === qNum))) ||
+                      currentPkg?.questions.find((q) => q.id === qKey || (qNum && q.number === qNum)) ||
+                      REVISED_QUESTIONS_24.find((q) => q.id === qKey || (qNum && q.number === qNum)) ||
+                      DEFAULT_EMPLOYABILITY_PACKAGE.questions.find((q) => q.id === qKey || (qNum && q.number === qNum))
+                    );
                     const qNumber = qItem?.number ?? (idx + 1);
 
                     const evidencesThisQ: MultimodalEvidence[] =
@@ -608,15 +626,15 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                       </div>
 
                       {/* Stimulus Kontekstual Soal (jika ada) */}
-                      {qItem?.stimulus && (
-                        <div className="p-3 rounded-xl bg-blue-950/30 border border-blue-800/40 space-y-1">
+                      {(qItem?.stimulus || (qItem as any)?.contextText) && (
+                        <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-800/50 space-y-1.5">
                           <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
                             <BookOpen className="w-3.5 h-3.5" />
                             Stimulus Kontekstual Laboratorium:
                           </span>
-                          <p className="text-xs text-blue-100/90 leading-relaxed font-serif whitespace-pre-wrap">
-                            {qItem.stimulus}
-                          </p>
+                          <div className="text-xs text-blue-100/90 leading-relaxed font-serif whitespace-pre-wrap">
+                            {qItem?.stimulus || (qItem as any)?.contextText}
+                          </div>
                         </div>
                       )}
 
@@ -630,71 +648,105 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                         </p>
                       </div>
 
-                      {/* Kunci Jawaban Acuan Standar Guru / Rubrik Pilihan 1-5 */}
-                      {(qItem as any)?.scoringMap ? (
-                        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
+                      {/* Komparasi Opsi Pilihan Ganda Siswa vs Kunci Jawaban */}
+                      {qItem?.options && qItem.options.length > 0 && (
+                        <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="text-amber-400 font-bold text-xs flex items-center gap-1.5">
-                              <span>📊</span> Rubrik Penskoran Setiap Kunci Pilihan (Skala 1–5 Non-Tes):
+                              <span>📊</span> {(qItem as any)?.scoringMap ? 'Rubrik Penskoran Setiap Kunci Pilihan (Skala 1–5 Non-Tes):' : 'Daftar Opsi Pilihan Ganda & Analisis Jawaban Siswa:'}
                             </span>
                             <span className="text-[10px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded font-medium">
-                              Maks 5 Poin / Butir
+                              {(qItem as any)?.scoringMap ? 'Maks 5 Poin / Butir' : `Skor: ${currentQuestionScore} / ${maxQuestionPoints}`}
                             </span>
                           </div>
+
                           <div className="grid grid-cols-1 gap-1.5 pt-0.5">
-                            {qItem.options?.map((opt: string, optIdx: number) => {
+                            {qItem.options.map((opt: string, optIdx: number) => {
                               const letter = String.fromCharCode(65 + optIdx);
-                              const score = (qItem as any).scoringMap?.[letter] || (opt === qItem.correctAnswer ? 5 : 1);
-                              const isStudentPick = ans.selectedOption === opt;
-                              const isBest = score === 5;
+                              const score = (qItem as any).scoringMap?.[letter] || (opt === qItem.correctAnswer ? 1 : 0);
+
+                              const studentClean = (ans.selectedOption || '').trim().toUpperCase();
+                              const optClean = (opt || '').trim().toUpperCase();
+                              const correctClean = (qItem.correctAnswer || '').trim().toUpperCase();
+
+                              const isStudentPick = studentClean === optClean ||
+                                (studentClean.length === 1 && (studentClean === letter || optClean.startsWith(studentClean))) ||
+                                (optClean.startsWith(studentClean) && studentClean.length > 0);
+
+                              const isCorrectAnswer = (qItem as any).scoringMap
+                                ? (qItem.correctAnswer ? optClean.startsWith(correctClean.slice(0, 1)) : score === 5)
+                                : (correctClean.length > 0 && (optClean === correctClean || optClean.startsWith(correctClean.slice(0, 1))));
+
                               return (
                                 <div
                                   key={optIdx}
-                                  className={`p-2 rounded-lg text-xs flex items-center justify-between gap-2 border transition-all ${
-                                    isStudentPick
-                                      ? 'bg-amber-500/15 border-amber-500/50 text-amber-100 font-medium'
-                                      : isBest
-                                      ? 'bg-emerald-950/30 border-emerald-800/40 text-slate-300'
+                                  className={`p-2.5 rounded-lg text-xs flex items-center justify-between gap-2 border transition-all ${
+                                    isStudentPick && isCorrectAnswer
+                                      ? 'bg-emerald-950/40 border-emerald-500/70 text-emerald-100 font-medium'
+                                      : isStudentPick && !isCorrectAnswer
+                                      ? 'bg-rose-950/40 border-rose-500/70 text-rose-100 font-medium'
+                                      : isCorrectAnswer
+                                      ? 'bg-emerald-950/20 border-emerald-800/40 text-emerald-300'
                                       : 'bg-slate-950 border-slate-800/60 text-slate-400'
                                   }`}
                                 >
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 flex-1">
                                     <span className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[11px] shrink-0 ${
-                                      isStudentPick ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-300'
+                                      isStudentPick && isCorrectAnswer
+                                        ? 'bg-emerald-500 text-slate-950'
+                                        : isStudentPick && !isCorrectAnswer
+                                        ? 'bg-rose-500 text-white'
+                                        : isCorrectAnswer
+                                        ? 'bg-emerald-800 text-emerald-200'
+                                        : 'bg-slate-800 text-slate-300'
                                     }`}>
                                       {letter}
                                     </span>
-                                    <span className="line-clamp-1">{opt}</span>
+                                    <span className="line-clamp-2">{opt}</span>
                                   </div>
+
                                   <div className="flex items-center gap-1.5 shrink-0">
                                     {isStudentPick && (
-                                      <span className="text-[10px] font-bold text-amber-400 bg-amber-400/20 px-1.5 py-0.5 rounded">
-                                        Pilihan Siswa
+                                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                                        isCorrectAnswer
+                                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                                          : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                                      }`}>
+                                        {isCorrectAnswer ? '✓ Pilihan Siswa (Benar)' : '✕ Pilihan Siswa (Salah)'}
                                       </span>
                                     )}
-                                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${
-                                      isBest
-                                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                        : score >= 3
-                                        ? 'bg-blue-500/20 text-blue-300'
-                                        : 'bg-slate-800 text-slate-400'
-                                    }`}>
-                                      {isBest ? `★ Skor ${score} (Acuan)` : `Skor ${score}`}
-                                    </span>
+                                    {isCorrectAnswer && !isStudentPick && (
+                                      <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 rounded">
+                                        ★ Kunci Jawaban
+                                      </span>
+                                    )}
+                                    {(qItem as any)?.scoringMap && (
+                                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${
+                                        score === 5
+                                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                          : score >= 3
+                                          ? 'bg-blue-500/20 text-blue-300'
+                                          : 'bg-slate-800 text-slate-400'
+                                      }`}>
+                                        Skor {score}
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                               );
                             })}
                           </div>
                         </div>
-                      ) : (qItem?.sampleAnswer || qItem?.correctAnswer) ? (
+                      )}
+
+                      {!qItem?.options && (qItem?.sampleAnswer || qItem?.correctAnswer) && (
                         <div className="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 text-[11px] text-slate-300">
                           <span className="text-amber-400 font-semibold block mb-0.5">
                             Kunci Jawaban Acuan:
                           </span>
                           <p className="text-slate-200">{qItem.sampleAnswer || qItem.correctAnswer}</p>
                         </div>
-                      ) : null}
+                      )}
 
                       {/* Teks / Respon Jawaban Siswa */}
                       {!hasAnswer ? (

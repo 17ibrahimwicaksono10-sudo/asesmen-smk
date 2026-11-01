@@ -621,14 +621,16 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       requiresTeacherReview: requiresReview,
       evidences: allEvidences,
       aiEvaluation: isTechnicalExam
-        ? `Skor Total Mentah: ${scoreResult.totalRawScore}/65 (${scoreResult.finalPercentage}%). Terdiri atas 6 dimensi kemampuan teknis kimia sesuai rubrik penskoran standar.`
-        : `Skor Total Non-Tes Employability: ${empResult ? empResult.totalRawScore : scoreResult.totalRawScore}/90 (${empResult ? empResult.finalPercentage : scoreResult.finalPercentage}% - Kategori ${empResult?.category || 'Sangat baik'}). ${empResult?.interpretation || ''}`,
+        ? `Skor Total Mentah: ${scoreResult.totalRawScore}/${scoreResult.maxRawScore || 65} (${scoreResult.finalPercentage}%). Terdiri atas seluruh butir kemampuan teknis kimia sesuai rubrik penskoran standar.`
+        : `Skor Total Non-Tes Employability: ${empResult ? empResult.totalRawScore : scoreResult.totalRawScore}/${empResult ? empResult.maxTotalRawScore : (scoreResult.maxRawScore || 90)} (${empResult ? empResult.finalPercentage : scoreResult.finalPercentage}% - Kategori ${empResult?.category || 'Sangat baik'}). ${empResult?.interpretation || ''}`,
+      rawScoreTotal: isEmployabilityExam ? (empResult ? empResult.totalRawScore : scoreResult.totalRawScore) : scoreResult.totalRawScore,
+      maxRawScore: isEmployabilityExam ? (empResult ? empResult.maxTotalRawScore : scoreResult.maxRawScore) : scoreResult.maxRawScore,
       teacherFollowUp: requiresReview
         ? 'Terdapat jawaban yang disampaikan melalui rekaman audio atau berkas dokumen yang memerlukan verifikasi langsung oleh guru penguji.'
         : isTechnicalExam
-          ? 'Pemeriksaan analitis seluruh komponen rubrik 6 dimensi instrumen teknis kimia telah selesai.'
+          ? 'Pemeriksaan analitis seluruh komponen rubrik instrumen teknis kimia telah selesai.'
           : `Pemeriksaan instrumen non-tes employability telah selesai sesuai rubrik 18 butir (1-5 per respons). Kategori: ${empResult?.category || 'Sangat baik'}.`
-    };
+    } as any;
 
     try {
       await onSubmitExam(submission);
@@ -834,17 +836,44 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           )}
 
           {/* Stimulus Context Box if available */}
-          {currentQuestion.stimulus && (
-            <div className="p-4 rounded-xl bg-blue-950/40 border border-blue-800/60 space-y-2">
-              <div className="flex items-center gap-2 text-xs font-bold text-blue-400 uppercase tracking-wider">
-                <BookOpen className="w-4 h-4 text-blue-400" />
-                <span>Stimulus Kontekstual Laboratorium</span>
+          {(() => {
+            const stimulusContent = currentQuestion.stimulus ||
+              REVISED_QUESTIONS_24.find(q => q.id === currentQuestion.id || (currentQuestion.number && q.number === currentQuestion.number))?.stimulus;
+
+            if (!stimulusContent) return null;
+
+            return (
+              <div className="p-4 rounded-xl bg-blue-950/40 border border-blue-800/60 space-y-2.5">
+                <div className="flex items-center gap-2 text-xs font-bold text-blue-400 uppercase tracking-wider">
+                  <BookOpen className="w-4 h-4 text-blue-400 shrink-0" />
+                  <span>Stimulus Kontekstual Laboratorium</span>
+                </div>
+                <div className="text-xs text-blue-100 leading-relaxed whitespace-pre-line font-serif">
+                  {stimulusContent}
+                </div>
+                {Array.isArray(currentQuestion.dataTables) && currentQuestion.dataTables.length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    {currentQuestion.dataTables.map((tbl: any, tIdx: number) => (
+                      <div key={tIdx} className="overflow-x-auto rounded-lg border border-blue-900/60 bg-slate-950/60 p-2">
+                        <table className="w-full text-[11px] text-slate-200">
+                          {tbl.title && <caption className="text-left font-bold text-amber-300 pb-1">{tbl.title}</caption>}
+                          <tbody>
+                            {Array.isArray(tbl.rows) && tbl.rows.map((row: any[], rIdx: number) => (
+                              <tr key={rIdx} className={rIdx === 0 ? "font-bold text-blue-300 border-b border-blue-900/50" : "border-b border-slate-900"}>
+                                {row.map((cell: any, cIdx: number) => (
+                                  <td key={cIdx} className="px-2 py-1">{cell}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <p className="text-xs text-blue-100 leading-relaxed whitespace-pre-line font-serif">
-                {currentQuestion.stimulus}
-              </p>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Question Text */}
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 text-sm leading-relaxed font-semibold">
@@ -951,13 +980,32 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
           {/* 3. Matching (Column A -> Column B: Eliminasi Otomatis Opsi Terpilih) */}
           {currentQuestion.type === 'matching' && (() => {
-            const colA = (currentQuestion.matchingColumnA && currentQuestion.matchingColumnA.length > 0)
+            const canonicalMatchQ = REVISED_QUESTIONS_24.find(q => q.id === currentQuestion.id || (currentQuestion.number && q.number === currentQuestion.number));
+
+            const rawColA = (currentQuestion.matchingColumnA && currentQuestion.matchingColumnA.length > 0)
               ? currentQuestion.matchingColumnA
-              : (activeQuestions.find(q => q.id === currentQuestion.id)?.matchingColumnA || []);
-            const colB = (currentQuestion.matchingColumnB && currentQuestion.matchingColumnB.length > 0)
+              : (activeQuestions.find(q => q.id === currentQuestion.id)?.matchingColumnA || canonicalMatchQ?.matchingColumnA || []);
+
+            const colA = rawColA.map((item, iIdx) => ({
+              id: item.id || `m-item-${iIdx}`,
+              columnAText: item.columnAText || (item as any).item || (item as any).label || `Pernyataan ${iIdx + 1}`
+            }));
+
+            const rawColB = (currentQuestion.matchingColumnB && currentQuestion.matchingColumnB.length > 0)
               ? currentQuestion.matchingColumnB
-              : (activeQuestions.find(q => q.id === currentQuestion.id)?.matchingColumnB || []);
+              : (activeQuestions.find(q => q.id === currentQuestion.id)?.matchingColumnB || canonicalMatchQ?.matchingColumnB || []);
+
+            const colB: string[] = rawColB.map(b => typeof b === 'string' ? b : ((b as any)?.match || (b as any)?.item || (b as any)?.label || String(b || '')));
+
             const matchingAns = answersState[currentQuestion.id]?.matchingAnswers || {};
+
+            if (colA.length === 0 || colB.length === 0) {
+              return (
+                <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-800/40 text-xs text-amber-300">
+                  Data butir menjodohkan sedang dimuat atau tidak tersedia. Silakan lanjutkan pengerjaan atau muat ulang halaman.
+                </div>
+              );
+            }
 
             return (
               <div className="space-y-4">
@@ -973,7 +1021,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
                 <div className="space-y-3">
                   {colA.map((item) => {
-                    const currentMatch = (matchingAns[item.id] || '').trim();
+                    const currentMatch = (typeof matchingAns[item.id] === 'string' ? matchingAns[item.id] : '').trim();
 
                     // Kumpulkan semua opsi Kolom B yang SUDAH dipilih oleh item Kolom A lainnya
                     const takenByOthers = new Set<string>();
@@ -985,7 +1033,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
                     // Filter opsi Kolom B yang belum dipilih ATAU opsi yang sedang aktif dipilih oleh item ini
                     const availableBOptions = colB.filter((bOpt) => {
-                      const cleanBOpt = (bOpt || '').trim();
+                      const cleanBOpt = (typeof bOpt === 'string' ? bOpt : String(bOpt || '')).trim();
                       return !takenByOthers.has(cleanBOpt) || cleanBOpt === currentMatch;
                     });
 

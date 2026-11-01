@@ -22,6 +22,14 @@ import {
 import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
 import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
+import {
+  evaluateTypedEssayWithDeepSeek,
+  evaluateImageWithGeminiVision,
+  evaluateAudioWithGeminiSTTAndDeepSeek,
+  evaluateStudentAnswerStandard,
+  StandardAIEvaluationResult
+} from "./aiEvaluationRouter";
+
 
 export function reloadEnv(): void {
   const pBackend = path.resolve(process.cwd(), "backend", ".env");
@@ -184,7 +192,7 @@ async function callModalityAI(
         }
       } else if (selectedProvider.type === 'Gemini') {
         const apiKey = selectedProvider.apiKey;
-        const model = selectedProvider.model || 'gemini-3.5-flash';
+        const model = selectedProvider.model || 'gemini-2.5-flash';
         const ai = new GoogleGenAI({ apiKey });
         const resp = await ai.models.generateContent({
           model,
@@ -208,11 +216,11 @@ async function callModalityAI(
   } else {
     const ai = getGenAI();
     const resp = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: { responseMimeType: 'application/json' },
     });
-    return { jsonText: resp.text || '{}', providerName: 'Gemini 3.5 Flash (.env fallback)' };
+    return { jsonText: resp.text || '{}', providerName: 'Gemini 2.5 Flash (.env fallback)' };
   }
 }
 
@@ -1104,6 +1112,14 @@ export function sanitizeQuestionsForStudent(questions: QuestionItem[]): any[] {
       number: q.number,
       category: q.category,
       topic: q.topic,
+      stimulus: q.stimulus,
+      indicator: q.indicator,
+      context: (q as any).context,
+      dimensionId: (q as any).dimensionId,
+      dimensionName: (q as any).dimensionName,
+      aspectId: (q as any).aspectId,
+      aspectName: (q as any).aspectName,
+      cognitiveLevel: q.cognitiveLevel,
       questionText: q.questionText,
       type: q.type,
       points: q.points,
@@ -1113,14 +1129,17 @@ export function sanitizeQuestionsForStudent(questions: QuestionItem[]): any[] {
       instructions: q.instructions,
       contextText: q.contextText,
       dataTables: q.dataTables,
+      unit: q.unit,
+      calculationPrompt: q.calculationPrompt,
       options: q.options ? [...q.options] : undefined,
     };
 
     if (q.subQuestions) {
       clean.subQuestions = q.subQuestions.map(sq => ({
         id: sq.id,
-        label: sq.label,
-        prompt: sq.prompt,
+        label: (sq as any).label || (sq as any).text,
+        text: (sq as any).text || (sq as any).label,
+        prompt: (sq as any).prompt || (sq as any).text,
         points: sq.points
       }));
     }
@@ -1128,24 +1147,25 @@ export function sanitizeQuestionsForStudent(questions: QuestionItem[]): any[] {
     if (q.matchingColumnA) {
       clean.matchingColumnA = q.matchingColumnA.map(m => ({
         id: m.id,
-        label: m.label,
-        item: m.item
+        columnAText: m.columnAText || (m as any).item || (m as any).label || '',
+        label: (m as any).label || m.columnAText || '',
+        item: (m as any).item || m.columnAText || ''
         // OMIT m.correctMatch! Siswa tidak boleh melihat kunci pasangan
       }));
     }
 
     if (q.matchingColumnB) {
-      clean.matchingColumnB = q.matchingColumnB.map(m => ({
-        id: m.id,
-        label: m.label,
-        match: m.match
-      }));
+      clean.matchingColumnB = q.matchingColumnB.map(m => {
+        if (typeof m === 'string') return m;
+        return (m as any).match || (m as any).item || (m as any).label || String(m);
+      });
     }
 
     if (q.statements) {
       clean.statements = q.statements.map(s => ({
         id: s.id,
-        statement: s.statement,
+        statement: s.statement || (s as any).text,
+        text: (s as any).text || s.statement,
         options: s.options ? [...s.options] : undefined
         // OMIT s.correctAnswer! Siswa tidak boleh melihat kunci pernyataan
       }));
@@ -1158,6 +1178,7 @@ export function sanitizeQuestionsForStudent(questions: QuestionItem[]): any[] {
     return clean;
   });
 }
+
 
 // Endpoint Pembukaan Soal Ujian Siswa (Resolusi Referensi Paket yang Kuat & Snapshot Konsisten)
 app.get("/api/exams/:id/questions", requireAuth, (req: AuthenticatedRequest, res: Response) => {
@@ -1705,6 +1726,8 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
   // Skor persentase akhir dihitung ketat di server (MENGABAIKAN totalScore kiriman browser!)
   const finalPercentage = maxRawScore > 0 ? Math.round((totalRawScore / maxRawScore) * 100) : 0;
   submission.totalScore = finalPercentage;
+  (submission as any).rawScoreTotal = totalRawScore;
+  (submission as any).maxRawScore = maxRawScore;
 
   if (isEmployability) {
     submission.employabilityScore = finalPercentage;
@@ -1825,6 +1848,9 @@ app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Resp
     }
   }
   submission.questionSnapshot = JSON.parse(JSON.stringify(canonicalQuestions));
+  if (!submission.id) {
+    submission.id = `sub-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  }
 
   // 4. Kalkulasi dan validasi nilai di server secara independen (JANGAN percaya totalScore browser!)
   evaluateSubmissionServerSide(submission, canonicalQuestions);
@@ -2017,52 +2043,44 @@ app.post("/api/reset-data", requireAuth, requireRole("admin"), (_req: Authentica
 });
 
 // -------------------------------------------------------------
-// AI: Evaluate Essay (Gemini / DeepSeek auto-select)
+// AI: Evaluate Essay (Strictly DeepSeek untuk Jawaban Ketikan)
 // -------------------------------------------------------------
 app.post("/api/ai/evaluate-essay", async (req: Request, res: Response) => {
   try {
-    const { questionText, answerKey, rubricGuide, studentAnswer } = req.body;
+    const { questionId, attemptId, questionText, answerKey, rubricGuide, rubricComponents, studentAnswer, maxScore } = req.body;
 
     if (!studentAnswer || !questionText) {
       return res.status(400).json({ error: "Data pertanyaan dan jawaban siswa wajib diisi." });
     }
 
-    const prompt = `
-Anda adalah seorang Evaluator Asesmen Vokasi SMK Kimia Industri dan Employability Skills.
-Tugas Anda adalah menilai jawaban esai/kasus siswa berdasarkan Kunci Jawaban dan Pedoman Rubrik.
+    const context = {
+      questionId: questionId || "q-essay",
+      attemptId: attemptId || `att-${Date.now()}`,
+      questionText,
+      answerKey: answerKey || "Sesuai standar operasional industri",
+      rubricGuide: rubricGuide || "Penilaian ketepatan konsep dan prosedur K3",
+      rubricComponents,
+      maxScore: Number(maxScore) || 10,
+    };
 
-Soal: ${questionText}
-Kunci Jawaban Acuan: ${answerKey || "Sesuai standar operasional industri"}
-Pedoman Rubrik: ${rubricGuide || "Penilaian ketepatan konsep dan prosedur K3"}
-Jawaban Siswa: ${studentAnswer}
+    // ATURAN 1: Teks ketikan siswa dievaluasi STRICTLY oleh DeepSeek (Gemini dilarang)
+    const standardResult = await evaluateTypedEssayWithDeepSeek(context, String(studentAnswer));
 
-Berikan output JSON dengan format persis berikut:
-{
-  "estimatedScore": number antara 0-100,
-  "constructiveFeedback": "Ulasan objektif dan memotivasi untuk siswa...",
-  "keyConceptsMastered": ["konsep 1", "konsep 2"],
-  "areasToImprove": ["area 1", "area 2"]
-}`;
-
-    let jsonText: string;
-    let provider: string;
-
-    if (isDeepSeekEnabled()) {
-      provider = "deepseek";
-      jsonText = await callDeepSeek(prompt, "Anda adalah evaluator asesmen vokasi SMK yang profesional. Selalu jawab dalam format JSON valid.");
-    } else {
-      provider = "gemini";
-      const ai = getGenAI();
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: { responseMimeType: "application/json" },
-      });
-      jsonText = response.text || "{}";
-    }
-
-    const result = JSON.parse(jsonText);
-    res.json({ success: true, evaluation: result, provider });
+    res.json({
+      success: true,
+      evaluation: {
+        estimatedScore: standardResult.total_score,
+        constructiveFeedback: standardResult.feedback,
+        scoringReason: standardResult.scoring_reason,
+        rubricScores: standardResult.rubric_scores,
+        status: standardResult.assessment_status,
+        requiresTeacherReview: standardResult.requires_teacher_review,
+        keyConceptsMastered: standardResult.rubric_scores.filter(r => r.score > 0).map(r => r.indicator),
+        areasToImprove: standardResult.rubric_scores.filter(r => r.score < r.maxScore).map(r => r.indicator),
+      },
+      standardResult,
+      provider: standardResult.model_used,
+    });
   } catch (error: any) {
     console.error("Error in AI evaluate-essay:", error);
     res.status(500).json({
@@ -2406,7 +2424,7 @@ Output JSON lengkap:
       provider = "gemini";
       const ai = getGenAI();
       const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: "gemini-2.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -2956,7 +2974,7 @@ Berikan JSON:
   if (rawFileData && apiKey) {
     const base64Clean = rawFileData.replace(/^data:[^;]+;base64,/, "");
     const mimeType = rawFileData.split(";")[0]?.replace("data:", "") || (isAudio ? "audio/webm" : "image/jpeg");
-    const candidateModels = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"];
+    const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"];
 
     for (const model of candidateModels) {
       if (aiWorked) break;
@@ -3568,6 +3586,8 @@ app.get("/api/evidence/audit/:evidenceId", (req: Request, res: Response) => {
 app.post("/api/ai/evaluate-rubric-multimodal", async (req: Request, res: Response) => {
   try {
     const {
+      questionId,
+      attemptId,
       questionText,
       sampleAnswer,
       rubricGuide,
@@ -3576,167 +3596,99 @@ app.post("/api/ai/evaluate-rubric-multimodal", async (req: Request, res: Respons
       multimodalEvidences
     } = req.body;
 
-    // Cek apakah siswa sama sekali tidak menjawab (tidak ada teks isian dan tidak ada bukti dengan transkripsi/OCR)
-    const hasAnyStudentText = Boolean(studentTextAnswer && studentTextAnswer.trim().length > 0);
-    const hasAnyExtractedEvidence = Array.isArray(multimodalEvidences) && multimodalEvidences.some((ev: any) => ev.extractedText && ev.extractedText.trim().length > 0);
-
-    if (!hasAnyStudentText && !hasAnyExtractedEvidence) {
-      // Siswa tidak memberikan respon teks / berkas belum terurai -> Skor 0 Mutlak!
-      const maxPts = (rubricComponents || []).reduce((acc: number, c: any) => acc + (c.points || c.maxPoints || 0), 0) || 10;
-      return res.json({
-        success: true,
-        rubricResult: {
-          evaluatedAt: new Date().toLocaleString("id-ID"),
-          modelUsed: "Rule-Based Strict Zero Engine",
-          promptVersion: "v2.5-strict-zero",
-          totalScoreGiven: 0,
-          maxTotalScore: maxPts,
-          scoresPerIndicator: (rubricComponents || []).map((rc: any) => ({
-            indicatorName: rc.indicator || rc.name || "Indikator Penilaian",
-            maxPoints: rc.points || rc.maxPoints || 0,
-            scoreGiven: 0,
-            rationale: "Siswa tidak memberikan jawaban teks maupun transkripsi berkas bukti pada butir soal ini."
-          })),
-          evidenceHighlights: [],
-          confidenceStatus: "Sangat Yakin",
-          confidenceLevel: "high",
-          requiresTeacherReview: false,
-          constructiveFeedback: "Siswa tidak memberikan jawaban teks maupun berkas bukti yang terurai. Nilai yang diberikan adalah 0.",
-          keyMasteredConcepts: [],
-          areasForImprovement: ["Siswa perlu menjawab soal ini secara lengkap dan jelas."]
-        },
-        provider: "system"
-      });
-    }
-
-    // Gabungkan seluruh bukti multimodal terekstraksi + jawaban teks biasa
-    let combinedEvidenceText = `Jawaban Teks Siswa:\n${studentTextAnswer || "(tidak ada teks langsung)"}\n\n`;
-
-    let hasFailedEvidence = false;
-    const failedEvidences: string[] = [];
-
-    if (Array.isArray(multimodalEvidences) && multimodalEvidences.length > 0) {
-      combinedEvidenceText += "BUKTI MULTIMODAL TERLAMPIR (Audio / Tulisan Tangan / Dokumen):\n";
-      multimodalEvidences.forEach((ev: any, idx: number) => {
-        const isFailed = ev.extractionStatus === "extraction_failed" || ev.extractionStatus === "failed" || !ev.extractedText;
-        if (isFailed && (ev.extractionStatus === "extraction_failed" || ev.extractionStatus === "failed")) {
-          hasFailedEvidence = true;
-          failedEvidences.push(`${ev.modalityType.toUpperCase()} (${ev.fileName})`);
-        }
-
-        combinedEvidenceText += `[Bukti #${idx + 1} - ${ev.modalityType.toUpperCase()} - File: ${ev.fileName}]\n`;
-        combinedEvidenceText += `Status Ekstraksi: ${ev.extractionStatus || (ev.extractedText ? "completed" : "extraction_failed")}\n`;
-        combinedEvidenceText += `Teks Terekstraksi: ${ev.extractedText || "(GAGAL DIEKSTRAKSI / KOSONG - DILARANG MENGARANG ATAU MENILAI TEKS SIMULASI)"}\n`;
-        if (ev.unreadableFlags && ev.unreadableFlags.length > 0) {
-          combinedEvidenceText += `Catatan Bagian Samar/Uncertainty: ${JSON.stringify(ev.unreadableFlags)}\n`;
-        }
-        combinedEvidenceText += `---\n`;
-      });
-    }
-
-    const prompt = `
-Anda adalah Mesin Penilaian AI Berbasis Rubrik (Automated Rubric-Aligned Scoring Engine) untuk Asesmen Vokasi SMK Kimia Industri.
-Tugas Anda adalah menilai bukti kompetensi siswa (teks + transkrip audio STT + OCR tulisan tangan) secara OBJEKTIF dan TERSTRUKTUR berdasarkan Rubrik yang ditetapkan.
-
-=== CONTEXT SOAL & RUBRIK ===
-Pertanyaan Soal: ${questionText}
-Kunci Jawaban Standar: ${sampleAnswer || "Sesuai Prosedur Standar Operasional Industri"}
-Pedoman Rubrik umum: ${rubricGuide || "Penilaian K3LH, Prosedur, Perhitungan, dan Kesimpulan"}
-Komponen Rubrik Spesifik: ${JSON.stringify(rubricComponents || [], null, 2)}
-
-=== BUKTI DARI SISWA (Teks + Multimodal STT/OCR) ===
-${combinedEvidenceText}
-
-=== ATURAN SCORING & RESEARCH REQUIREMENT ===
-1. Hitung skor per indikator komponen rubrik secara eksplisit.
-2. Sediakan evidenceHighlights (kutipan kalimat spesifik dari siswa yang mendukung pemberian skor).
-3. Evaluasi status keyakinan AI:
-   - "Sangat Yakin": Jika bukti jelas dan lengkap.
-   - "Yakin Cukup": Jika ada sedikit kelangkaan rincian.
-   - "Ragu / Perlu Review Guru": Jika terdapat bagian tulisan/suara samar, unreadable flags, status extraction_failed, atau kejanggalan logika.
-4. Kriteria Selesai & Proteksi Anti-Simulasi:
-   - Kesalahan ekstraksi/suara bising TIDAK otomatis dinilai sebagai kesalahan kompetensi siswa (berikan status Ragu agar diverifikasi guru).
-   - JIKA BUKTI BERSTATUS 'extraction_failed' ATAU TEKS KOSONG: AI DILARANG MENGARANG atau mengasumsikan kompetensi siswa. Wajib tandai "requiresTeacherReview": true dan "confidenceStatus": "Ragu / Perlu Review Guru".
-
-Berikan output JSON dengan skema persis:
-{
-  "totalScoreGiven": number,
-  "maxTotalScore": number,
-  "scoresPerIndicator": [
-    {
-      "indicatorName": "Nama Indikator / Rubrik Component",
-      "maxPoints": number,
-      "scoreGiven": number,
-      "rationale": "Alasan penilaian..."
-    }
-  ],
-  "evidenceHighlights": [
-    {
-      "quote": "Kutipan kalimat siswa...",
-      "sourceModality": "teks" atau "audio" atau "tulisan_tangan" atau "dokumen",
-      "supportingIndicator": "Nama Indikator",
-      "relevanceExplanation": "Penjelasan mengapa bukti ini mendukung skor..."
-    }
-  ],
-  "confidenceStatus": "Sangat Yakin" atau "Yakin Cukup" atau "Ragu / Perlu Review Guru",
-  "confidenceLevel": "high" atau "medium" atau "low",
-  "uncertaintyReason": "Penjelasan jika ragu atau null jika sangat yakin",
-  "requiresTeacherReview": boolean,
-  "constructiveFeedback": "Umpan balik konstruktif untuk siswa...",
-  "keyMasteredConcepts": ["konsep 1", "konsep 2"],
-  "areasForImprovement": ["area 1"]
-}`;
-
-    let jsonText: string;
-    let provider: string;
-
-    if (isDeepSeekEnabled()) {
-      provider = "deepseek";
-      jsonText = await callDeepSeek(
-        prompt,
-        "Anda adalah Rubric AI Scoring Engine profesional. Jawab selalu dalam JSON valid sesuai skema yang diminta."
-      );
-    } else {
-      provider = "gemini";
-      const ai = getGenAI();
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: { responseMimeType: "application/json" }
-      });
-      jsonText = response.text || "{}";
-    }
-
-    const parsed = JSON.parse(jsonText);
-
-    // Safeguard jika ada bukti multimodal yang gagal diekstraksi
-    if (hasFailedEvidence) {
-      parsed.confidenceStatus = "Ragu / Perlu Review Guru";
-      parsed.confidenceLevel = "low";
-      parsed.requiresTeacherReview = true;
-      const failedNames = failedEvidences.join(", ");
-      parsed.uncertaintyReason = (parsed.uncertaintyReason ? parsed.uncertaintyReason + "; " : "") +
-        `Terdapat bukti multimodal (${failedNames}) berstatus extraction_failed. AI tidak menyimulasikan teks narasi dan mewajibkan review manual berkas asli oleh Guru Evaluator.`;
-    }
-
-    const rubricResult = {
-      evaluatedAt: new Date().toLocaleString("id-ID"),
-      modelUsed: provider === "deepseek" ? "DeepSeek V3 / Chat" : "Gemini 2.5 Flash",
-      promptVersion: "v2.4-rubric-multimodal",
-      totalScoreGiven: parsed.totalScoreGiven || 0,
-      maxTotalScore: parsed.maxTotalScore || 10,
-      scoresPerIndicator: parsed.scoresPerIndicator || [],
-      evidenceHighlights: parsed.evidenceHighlights || [],
-      confidenceStatus: parsed.confidenceStatus || "Sangat Yakin",
-      confidenceLevel: parsed.confidenceLevel || "high",
-      uncertaintyReason: parsed.uncertaintyReason || undefined,
-      requiresTeacherReview: Boolean(parsed.requiresTeacherReview || parsed.confidenceStatus === "Ragu / Perlu Review Guru"),
-      constructiveFeedback: parsed.constructiveFeedback || "Penilaian AI selesai.",
-      keyMasteredConcepts: parsed.keyMasteredConcepts || [],
-      areasForImprovement: parsed.areasForImprovement || []
+    const maxPts = (rubricComponents || []).reduce((acc: number, c: any) => acc + (c.points || c.maxPoints || 0), 0) || 10;
+    const context: QuestionEvaluationContext = {
+      questionId: questionId || "q-essay",
+      attemptId: attemptId || `att-${Date.now()}`,
+      questionText: questionText || "Soal asesmen esai",
+      answerKey: sampleAnswer || "Sesuai Prosedur Standar Operasional Industri",
+      rubricGuide: rubricGuide || "Penilaian K3LH, Prosedur, Perhitungan, dan Kesimpulan",
+      rubricComponents,
+      maxScore: maxPts,
     };
 
-    res.json({ success: true, rubricResult, provider });
+    // Identifikasi apakah ada berkas bukti gambar atau audio
+    const evidencesList: MultimodalEvidence[] = Array.isArray(multimodalEvidences) ? multimodalEvidences : [];
+    const imageEvidence = evidencesList.find((e: any) => e.modalityType === 'image' || e.modalityType === 'tulisan_tangan');
+    const audioEvidence = evidencesList.find((e: any) => e.modalityType === 'audio' || e.modalityType === 'rekaman_suara');
+
+    let standardResult: StandardAIEvaluationResult;
+
+    if (imageEvidence && (imageEvidence.fileData || (imageEvidence as any).rawData)) {
+      // ATURAN 2: BUKTI FOTO / TULISAN TANGAN -> STRICTLY GEMINI VISION MULTIMODAL
+      // Gemini membaca tulisan tangan langsung dan menilai berdasarkan rubrik (DeepSeek DILARANG)
+      const rawData = imageEvidence.fileData || (imageEvidence as any).rawData;
+      const mime = imageEvidence.mimeType || 'image/jpeg';
+      standardResult = await evaluateImageWithGeminiVision(context, rawData, mime);
+    } else if (audioEvidence && (audioEvidence.fileData || (audioEvidence as any).rawData)) {
+      // ATURAN 3: REKAMAN SUARA -> 2 TAHAP: GEMINI STT (HANYA TRANSKRIPSI) -> DEEPSEEK (RUBRIK)
+      const rawData = audioEvidence.fileData || (audioEvidence as any).rawData;
+      const mime = audioEvidence.mimeType || 'audio/webm';
+      standardResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, rawData, mime);
+    } else if (studentTextAnswer && studentTextAnswer.trim().length > 0) {
+      // ATURAN 1: TEKS KETIKAN SISWA -> STRICTLY DEEPSEEK (Gemini DILARANG)
+      standardResult = await evaluateTypedEssayWithDeepSeek(context, studentTextAnswer);
+    } else {
+      // Tidak ada jawaban teks maupun berkas bukti
+      standardResult = {
+        question_id: context.questionId,
+        attempt_id: context.attemptId,
+        input_type: 'typed_text',
+        model_used: 'Rule-Based Strict Zero Engine',
+        transcription_or_extraction: '',
+        rubric_scores: (rubricComponents || []).map((rc: any) => ({
+          indicator: rc.indicator || rc.name || "Indikator Penilaian",
+          score: 0,
+          maxScore: rc.points || rc.maxPoints || 0,
+          feedback: "Siswa tidak memberikan jawaban teks maupun berkas bukti pada butir soal ini."
+        })),
+        total_score: 0,
+        maximum_score: maxPts,
+        feedback: "Siswa tidak memberikan respon jawaban teks maupun berkas bukti.",
+        scoring_reason: "Jawaban kosong / tidak dijawab.",
+        assessment_status: 'completed',
+        requires_teacher_review: false,
+        evaluated_at: new Date().toISOString(),
+        prompt_version: 'v3.0-empty-zero'
+      };
+    }
+
+    // Format kompatibel untuk panel inspeksi guru
+    const rubricResult = {
+      evaluatedAt: new Date().toLocaleString("id-ID"),
+      modelUsed: standardResult.model_used,
+      promptVersion: standardResult.prompt_version,
+      totalScoreGiven: standardResult.total_score,
+      maxTotalScore: standardResult.maximum_score,
+      scoresPerIndicator: standardResult.rubric_scores.map(r => ({
+        indicatorName: r.indicator,
+        scoreGiven: r.score,
+        maxPoints: r.maxScore,
+        rationale: r.feedback || standardResult.scoring_reason
+      })),
+      evidenceHighlights: standardResult.transcription_or_extraction ? [
+        {
+          quote: standardResult.transcription_or_extraction.substring(0, 150),
+          sourceModality: standardResult.input_type,
+          supportingIndicator: "Kutipan Jawaban Siswa",
+          relevanceExplanation: standardResult.scoring_reason
+        }
+      ] : [],
+      confidenceStatus: standardResult.requires_teacher_review ? "Ragu / Perlu Review Guru" : "Sangat Yakin",
+      confidenceLevel: standardResult.requires_teacher_review ? "low" : "high",
+      uncertaintyReason: standardResult.requires_teacher_review ? standardResult.scoring_reason : undefined,
+      requiresTeacherReview: standardResult.requires_teacher_review,
+      constructiveFeedback: standardResult.feedback,
+      keyMasteredConcepts: standardResult.rubric_scores.filter(r => r.score > 0).map(r => r.indicator),
+      areasForImprovement: standardResult.rubric_scores.filter(r => r.score < r.maxScore).map(r => r.indicator)
+    };
+
+    res.json({
+      success: true,
+      rubricResult,
+      standardResult,
+      provider: standardResult.model_used
+    });
   } catch (error: any) {
     console.error("Error in evaluate-rubric-multimodal:", error);
     res.status(500).json({ success: false, error: error.message });
