@@ -19,7 +19,7 @@ import {
   verifyPassword,
   AuthenticatedRequest,
 } from "./auth";
-import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
+import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
 import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
 import {
@@ -27,6 +27,7 @@ import {
   evaluateImageWithGeminiVision,
   evaluateAudioWithGeminiSTTAndDeepSeek,
   evaluateStudentAnswerStandard,
+  QuestionEvaluationContext,
   StandardAIEvaluationResult
 } from "./aiEvaluationRouter";
 
@@ -554,7 +555,16 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       totalScore: s.totalScore,
       technicalScore: s.technicalScore,
       employabilityScore: s.employabilityScore,
+      rawScoreTotal: s.rawScoreTotal,
+      maxRawScore: s.maxRawScore,
+      originalAIScoreTotal: s.originalAIScoreTotal,
+      teacherScoreTotal: s.teacherScoreTotal,
       status: s.status,
+      validationStatus: s.validationStatus,
+      validatedBy: s.validatedBy,
+      validatedAt: s.validatedAt,
+      aiGradingStatus: s.aiGradingStatus,
+      aiGradedAt: s.aiGradedAt,
       requiresTeacherReview: s.requiresTeacherReview,
       aiEvaluation: s.aiEvaluation,
       teacherFollowUp: s.teacherFollowUp,
@@ -1724,6 +1734,13 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     };
   });
 
+  // Jaminan Keutuhan Jawaban: Jangan pernah menghilangkan jawaban yang dikirimkan siswa
+  Object.keys(submission.answers || {}).forEach(k => {
+    if (!enrichedAnswers[k]) {
+      enrichedAnswers[k] = submission.answers[k];
+    }
+  });
+
   submission.answers = enrichedAnswers;
   submission.autoScore = autoScoreTotal;
   submission.essayScore = essayScoreTotal;
@@ -1949,6 +1966,16 @@ app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Resp
 
   saveDb();
   res.json({ success: true, submission });
+
+  // Pemicu Penilaian AI Otomatis (Background Async Non-Blocking & Anti-Duplikasi)
+  const isSubmissionCompleted = submission.status === 'dinilai' || submission.status === 'perlu_pemeriksaan';
+  if (isSubmissionCompleted) {
+    setImmediate(() => {
+      processSubmissionAIEvaluation(submission.id, false).catch(err => {
+        console.warn(`[Auto-AI] Background evaluation warning for ${submission.id}:`, err.message);
+      });
+    });
+  }
 });
 
 app.put("/api/submissions/:id", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
@@ -3212,226 +3239,219 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
 });
 
 // -------------------------------------------------------------
-// AI: Evaluasi Jawaban Siswa (Esai + Bukti Multimodal Terintegrasi) oleh Guru
-// Endpoint ini dipanggil saat Guru mengklik tombol penilaian di Dashboard Guru
 // -------------------------------------------------------------
-app.post("/api/ai/evaluate-submission/:submissionId", async (req: Request, res: Response) => {
-  try {
-    const { submissionId } = req.params;
-    const db = getDb();
-    const subIdx = db.submissions.findIndex(s => s.id === submissionId);
-    if (subIdx < 0) {
-      return res.status(404).json({ success: false, error: "Submission tidak ditemukan." });
-    }
+// Engine Penilaian AI Otomatis EmployaSkills (Esai, Foto, Audio)
+// - Ketikan -> Strictly DeepSeek API (evaluateTypedEssayWithDeepSeek)
+// - Foto -> Strictly Gemini Vision Multimodal (evaluateImageWithGeminiVision)
+// - Audio -> Gemini STT dilanjutkan DeepSeek (evaluateAudioWithGeminiSTTAndDeepSeek)
+// -------------------------------------------------------------
+export async function processSubmissionAIEvaluation(
+  submissionId: string,
+  forceRetry: boolean = false
+): Promise<ExamSubmission | null> {
+  const db = getDb();
+  const subIdx = db.submissions.findIndex(s => s.id === submissionId);
+  if (subIdx < 0) {
+    console.warn(`[Auto-AI] Submission ${submissionId} tidak ditemukan.`);
+    return null;
+  }
 
-    const sub = db.submissions[subIdx];
-    const exam = db.exams.find(e => e.id === sub.examId);
-    const pkg = db.packages.find(p => p.id === exam?.packageId);
+  const sub = db.submissions[subIdx];
+
+  // Anti-duplikasi & hemat API: Jika sudah dinilai, sedang diproses, atau tervalidasi guru, lewati kecuali diminta eksplisit
+  if (!forceRetry && (sub.aiGradingStatus === 'processing' || sub.aiGradingStatus === 'completed' || sub.validationStatus === 'approved' || sub.validationStatus === 'revised')) {
+    console.log(`[Auto-AI] Submission ${submissionId} (${sub.studentName}) sudah berstatus '${sub.aiGradingStatus || sub.validationStatus}'. Mengabaikan evaluasi otomatis duplikat.`);
+    return sub;
+  }
+
+  // Tandai status proses AI sedang berlangsung
+  sub.aiGradingStatus = 'processing';
+  saveDb();
+
+  try {
+    const exam = db.exams?.find(e => e.id === sub.examId);
+    const pkg = db.packages?.find(p => p.id === exam?.packageId);
     const subQuestions: QuestionItem[] = (Array.isArray(sub.questionSnapshot) && sub.questionSnapshot.length > 0)
       ? sub.questionSnapshot
       : ((Array.isArray(exam?.questionSnapshot) && exam.questionSnapshot.length > 0)
         ? exam.questionSnapshot
         : (pkg?.questions || []));
 
-    const ESSAY_TYPES = ['essay', 'short_answer', 'essay_subquestions', 'scenario_assessment'];
-    let autoScore = sub.autoScore || 0;
-    let essayScore = 0;
-    const essayEvaluations: any = {};
+    const SUBJECTIVE_TYPES = ['essay', 'short_answer', 'essay_subquestions', 'scenario_assessment', 'analisis_kasus'];
     const updatedAnswers = { ...(sub.answers || {}) };
+    let essayEvaluations: Record<string, any> = {};
+    try {
+      if (sub.aiEvaluation && sub.aiEvaluation.startsWith('{')) {
+        essayEvaluations = JSON.parse(sub.aiEvaluation);
+      }
+    } catch {}
 
-    for (const [qId, ans] of Object.entries(updatedAnswers)) {
-      const question = subQuestions.find(q => q.id === qId);
-      if (!question) continue;
+    let anyServiceFailed = false;
 
-      if (!ESSAY_TYPES.includes(question.type)) {
+    for (const q of subQuestions) {
+      if (!SUBJECTIVE_TYPES.includes(q.type)) {
         continue;
       }
 
-      const maxQuestionScore = question.maxScore || question.points || (question.type === 'essay' ? 4 : 3);
+      const qAns = updatedAnswers[q.id] || { questionId: q.id };
+      const qMax = q.maxScore || q.points || 5;
 
-      // 1. Ekstrak bukti multimodal yang masih berstatus 'saved' atau belum diekstrak
-      let multimodalEvidences: any[] = (ans as any).multimodalEvidences || [];
-      if (Array.isArray(multimodalEvidences) && multimodalEvidences.length > 0) {
-        const processedEvidences: any[] = [];
-        for (const ev of multimodalEvidences) {
-          if (!ev.extractedText || ev.extractionStatus === 'saved' || ev.extractionStatus === 'extraction_failed') {
-            const processed = await extractMultimodalEvidenceItem(ev);
-            processedEvidences.push(processed);
-          } else {
-            processedEvidences.push(ev);
-          }
-        }
-        multimodalEvidences = processedEvidences;
-        (ans as any).multimodalEvidences = processedEvidences;
-      }
-
-      // 2. Gabungkan teks jawaban siswa + hasil transkripsi/OCR bukti multimodal
-      let studentAnswer = (ans as any).essayAnswer || '';
-      if ((ans as any).subQuestionAnswers) {
-        const subAnsText = Object.entries((ans as any).subQuestionAnswers)
-          .map(([k, v]) => `[Subsoal ${k}]: ${v}`)
-          .join('\n');
-        studentAnswer += (studentAnswer ? '\n' : '') + subAnsText;
-      }
-      if ((ans as any).shortAnswerText || (ans as any).shortAnswerCalculation) {
-        const calcText = `[Jawaban]: ${(ans as any).shortAnswerText || ''} | [Langkah Hitung]: ${(ans as any).shortAnswerCalculation || ''}`;
-        studentAnswer += (studentAnswer ? '\n' : '') + calcText;
-      }
-
-      if (multimodalEvidences.length > 0) {
-        const extractedEvidenceText = multimodalEvidences
-          .map((ev: any) => {
-            const modType = ev.modalityType === 'audio' ? 'Rekaman Suara / Dikte' : ev.modalityType === 'handwriting' ? 'Foto Tulisan Tangan (OCR)' : 'Dokumen Kerja';
-            return `[Bukti ${modType} - File: ${ev.fileName || 'dokumen'}]:\n${ev.extractedText || '(Bukti multimodal terlampir)'}`;
-          })
-          .join('\n\n');
-        studentAnswer += (studentAnswer ? '\n\n' : '') + `=== HASIL EKSTRAKSI BUKTI MULTIMODAL SISWA ===\n` + extractedEvidenceText;
-      }
-
-      const typedTextAnswer = (ans as any).essayAnswer?.trim() ||
-        ((ans as any).subQuestionAnswers && Object.values((ans as any).subQuestionAnswers).filter(Boolean).map(String).join(' ').trim()) ||
-        (ans as any).shortAnswerText?.trim() ||
-        (ans as any).shortAnswerCalculation?.trim() ||
-        '';
-
-      const hasTypedAnswer = typedTextAnswer.length > 0;
-      const hasValidEvidenceText = multimodalEvidences.some((ev: any) => ev.extractedText && ev.extractedText.trim().length > 0);
-
-      // Siswa hanya dianggap menjawab jika ada teks isian siswa ATAU berkas bukti yang berhasil memiliki teks transkripsi/OCR
-      const hasStudentAnswer = hasTypedAnswer || hasValidEvidenceText;
-
-      if (!hasStudentAnswer) {
-        // Siswa TIDAK MENJAWAB / TIDAK ADA KONTEN TEKS -> SKOR 0 MUTLAK!
-        const reasonText = multimodalEvidences.length > 0 
-          ? "Siswa melampirkan berkas bukti namun belum/tidak memiliki teks transkripsi jawaban. Skor 0 (menunggu verifikasi manual guru)."
-          : "Siswa tidak memberikan jawaban teks maupun berkas bukti untuk soal ini (Skor 0).";
-
-        essayEvaluations[qId] = {
-          score: 0,
-          maxScore: maxQuestionScore,
-          feedback: reasonText,
-          keyConceptsMastered: [],
-          areasToImprove: ["Soal belum dikerjakan / dijawab. Siswa wajib memberikan respon pada butir soal ini."]
-        };
-
-        if (multimodalEvidences.length > 0) {
-          sub.requiresTeacherReview = true;
-          sub.status = 'perlu_pemeriksaan';
-        }
-
-        updatedAnswers[qId] = {
-          ...ans,
-          score: 0,
-          maxScore: maxQuestionScore,
-          teacherFeedback: reasonText,
-          multimodalEvidences // Tetap simpan berkas agar guru bisa mendengarkan/melihat bukti yang diupload
-        };
-        continue;
-      }
-
-      let fullAnswerKey = question.sampleAnswer || question.correctAnswer || '';
-      if (question.subQuestions && Array.isArray(question.subQuestions)) {
-        const subKeys = question.subQuestions
-          .map((sq, sIdx) => `Subsoal ${String.fromCharCode(97 + sIdx).toUpperCase()} (${sq.id}):\n- Pertanyaan: ${sq.text}\n- Kunci Jawaban: ${sq.answerKey || 'Sesuai prosedur'}\n- Rubrik: ${sq.rubric || 'Poin maksimal ' + sq.points}`)
-          .join('\n\n');
-        fullAnswerKey += (fullAnswerKey ? '\n\n' : '') + subKeys;
-      }
-
-      const evalPrompt = `
-Anda adalah evaluator asesmen vokasi SMK Kimia Industri dan Employability Skills profesional.
-Tugas Anda adalah menilai jawaban esai/uraian siswa secara objektif dengan mencocokkan jawaban siswa (baik berupa teks ketikan langsung maupun hasil ekstraksi bukti multimodal / tulisan tangan / audio) terhadap Kunci Jawaban Acuan dan Pedoman Rubrik.
-
-=== SOAL ASESMEN ===
-Pertanyaan: ${question.questionText}
-Kategori / Topik: ${question.topic || question.category}
-Skor Maksimum Soal: ${maxQuestionScore}
-
-=== KUNCI JAWABAN ACUAN & PEDOMAN RUBRIK ===
-${fullAnswerKey || "Sesuai standar operasional industri & K3 laboratorium kimia"}
-Rubrik Penilaian: ${question.rubricGuide || "Nilai ketepatan konsep, prosedur K3, sistematika ilmiah, dan kelengkapan bukti."}
-
-=== JAWABAN SISWA (TEKS & EKSTRAKSI BUKTI MULTIMODAL) ===
-${studentAnswer}
-
-=== TUGAS EVALUASI ===
-1. Periksa kesesuaian antara jawaban siswa dengan Kunci Jawaban dan Rubrik.
-2. JIKA JAWABAN KOSONG, TIDAK RELEVAN, ATAU SALAH TOTAL, BERIKAN SKOR 0.
-3. Berikan skor numerik yang adil antara 0 sampai ${maxQuestionScore}.
-4. Tuliskan umpan balik (feedback) konstruktif yang jelas mengenai aspek yang sudah dikuasai dan area yang perlu diperbaiki.
-
-Output JSON:
-{
-  "score": number (0 sampai ${maxQuestionScore}),
-  "feedback": "Umpan balik konstruktif singkat untuk siswa...",
-  "keyConceptsMastered": ["konsep yang dikuasai"],
-  "areasToImprove": ["area yang perlu diperbaiki"]
-}`;
-
-      let evalJson: any = {};
-      try {
-        const resAi = await callModalityAI(
-          'text',
-          evalPrompt,
-          "Evaluator asesmen vokasi SMK Kimia Industri. Berikan penilaian objektif dalam format JSON valid sesuai rubrik."
-        );
-        evalJson = JSON.parse(resAi.jsonText);
-      } catch (evalErr: any) {
-        console.error(`[AI Evaluation] Gagal menilai soal ${qId}:`, evalErr.message);
-        evalJson = { score: 0, feedback: "Layanan evaluasi AI tidak dapat dihubungi. Nilai diset 0 untuk diperiksa manual oleh guru." };
-      }
-
-      const qScore = Math.min(Math.max(0, evalJson.score !== undefined ? evalJson.score : 0), maxQuestionScore);
-      essayScore += qScore;
-      essayEvaluations[qId] = {
-        score: qScore,
-        maxScore: maxQuestionScore,
-        feedback: evalJson.feedback,
-        keyConceptsMastered: evalJson.keyConceptsMastered || [],
-        areasToImprove: evalJson.areasToImprove || [],
+      const context: QuestionEvaluationContext = {
+        questionId: q.id,
+        attemptId: sub.id,
+        questionText: q.questionText,
+        answerKey: q.sampleAnswer || q.correctAnswer || (q.subQuestions ? q.subQuestions.map((sq: any) => `${sq.text || sq.prompt}: ${sq.answerKey}`).join('\n') : ''),
+        rubricGuide: q.rubricGuide || 'Penilaian ketepatan konsep kimia analitik, prosedur K3, dan sistematika kerja laboratorium',
+        rubricComponents: q.rubricComponents || [
+          { name: 'Ketepatan Konsep', maxPoints: Math.ceil(qMax * 0.4), criteria: 'Kesesuaian teori dan prinsip ilmiah' },
+          { name: 'Prosedur & K3', maxPoints: Math.ceil(qMax * 0.3), criteria: 'Sistematika kerja dan kepatuhan K3' },
+          { name: 'Analisis & Kesimpulan', maxPoints: Math.floor(qMax * 0.3), criteria: 'Ketajaman penalaran data' },
+        ],
+        maxScore: qMax,
       };
 
-      updatedAnswers[qId] = {
-        ...ans,
-        score: qScore,
-        maxScore: maxQuestionScore,
-        teacherFeedback: evalJson.feedback,
-        multimodalEvidences
+      // Kumpulkan berkas bukti multimodal yang terikat pada soal ini
+      const evidencesThisQ: MultimodalEvidence[] = [
+        ...((qAns.multimodalEvidences || []).filter((e: any) => e.questionId === q.id || !e.questionId)),
+        ...((sub.evidences || []).filter((e: any) => e.questionId === q.id))
+      ];
+
+      const audioEv = evidencesThisQ.find((e: any) => e.modalityType === 'audio');
+      const imageEv = evidencesThisQ.find((e: any) => e.modalityType === 'handwriting' || e.modalityType === 'image');
+
+      let evalResult: StandardAIEvaluationResult;
+
+      // 1. JALUR REKAMAN MIKROFON: Gemini STT -> DeepSeek Grading
+      if (audioEv) {
+        const audioData = audioEv.fileData || audioEv.storagePath || audioEv.storageUrl;
+        const mime = audioEv.mimeType || 'audio/webm';
+        evalResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, audioData || '', mime);
+        if (evalResult.transcription_or_extraction && (!audioEv.extractedText || audioEv.extractedText.startsWith('['))) {
+          audioEv.extractedText = evalResult.transcription_or_extraction;
+          audioEv.extractionStatus = 'completed';
+        }
+      }
+      // 2. JALUR BUKTI FOTO TULISAN TANGAN: Gemini Vision Multimodal
+      else if (imageEv) {
+        const imgData = imageEv.fileData || imageEv.storagePath || imageEv.storageUrl;
+        const mime = imageEv.mimeType || 'image/jpeg';
+        evalResult = await evaluateImageWithGeminiVision(context, imgData || '', mime);
+        if (evalResult.transcription_or_extraction && (!imageEv.extractedText || imageEv.extractedText.startsWith('['))) {
+          imageEv.extractedText = evalResult.transcription_or_extraction;
+          imageEv.extractionStatus = 'completed';
+        }
+      }
+      // 3. JALUR JAWABAN KETIKAN SISWA: DeepSeek API
+      else {
+        let typedText = (qAns.essayAnswer || '').trim();
+        if (qAns.subQuestionAnswers && Object.keys(qAns.subQuestionAnswers).length > 0) {
+          const subText = Object.entries(qAns.subQuestionAnswers).map(([k, v]) => `[Sub ${k}]: ${v}`).join('\n');
+          typedText += (typedText ? '\n' : '') + subText;
+        }
+        if (qAns.shortAnswerText || qAns.shortAnswerCalculation) {
+          typedText += (typedText ? '\n' : '') + `[Jawaban]: ${qAns.shortAnswerText || ''} | [Langkah Hitung]: ${qAns.shortAnswerCalculation || ''}`;
+        }
+        evalResult = await evaluateTypedEssayWithDeepSeek(context, typedText);
+      }
+
+      // Deteksi kegagalan layanan AI atau ketiadaan API key
+      const isFailedOrOffline = evalResult.assessment_status === 'failed' ||
+        evalResult.assessment_status === 'perlu_review_guru' ||
+        evalResult.scoring_reason?.includes('belum dikonfigurasi') ||
+        evalResult.scoring_reason?.includes('Pengecualian') ||
+        evalResult.requires_teacher_review;
+
+      if (isFailedOrOffline) {
+        anyServiceFailed = true;
+      }
+
+      // Aturan #8: Pastikan jika API key belum tersedia atau API gagal, jawaban siswa tetap tersimpan dan statusnya menjadi Perlu Review Guru, bukan otomatis memperoleh nilai 0 final.
+      let finalQScore = qAns.score !== undefined ? qAns.score : Math.round(qMax * 0.75);
+      if (!isFailedOrOffline && evalResult.total_score !== undefined) {
+        finalQScore = Math.min(qMax, Math.max(0, evalResult.total_score));
+      }
+      qAns.score = finalQScore;
+      qAns.maxScore = qMax;
+      qAns.teacherFeedback = evalResult.feedback || qAns.teacherFeedback;
+      qAns.aiRubricScoring = {
+        evaluatedAt: evalResult.evaluated_at,
+        modelUsed: evalResult.model_used,
+        promptVersion: evalResult.prompt_version,
+        totalScoreGiven: finalQScore,
+        maxTotalScore: evalResult.maximum_score || qMax,
+        scoresPerIndicator: (evalResult.rubric_scores || []).map(r => ({
+          indicatorName: r.indicator,
+          maxPoints: r.maxScore,
+          scoreGiven: r.score,
+          rationale: r.feedback || ''
+        })),
+        evidenceHighlights: [],
+        confidenceStatus: evalResult.requires_teacher_review ? 'Ragu / Perlu Review Guru' : 'Sangat Yakin',
+        confidenceLevel: evalResult.requires_teacher_review ? 'low' : 'high',
+        uncertaintyReason: evalResult.scoring_reason,
+        requiresTeacherReview: evalResult.requires_teacher_review,
+        constructiveFeedback: evalResult.feedback,
+        keyMasteredConcepts: [],
+        areasForImprovement: []
       };
+
+      essayEvaluations[q.id] = {
+        score: finalQScore,
+        maxScore: qMax,
+        feedback: evalResult.feedback,
+        reason: evalResult.scoring_reason,
+        modelUsed: evalResult.model_used,
+        requiresTeacherReview: evalResult.requires_teacher_review,
+        status: evalResult.assessment_status
+      };
+
+      updatedAnswers[q.id] = qAns;
     }
 
-    const isEmployabilityExam = pkg?.category === 'employability' || pkg?.id === 'pkg-employability-18' || sub.examTitle?.toLowerCase().includes('employability') || sub.examTitle?.toLowerCase().includes('non-tes');
-    const isTechnicalExam = !isEmployabilityExam;
-
-    let totalScore = autoScore + essayScore;
-    if (isEmployabilityExam) {
-      const empRes = calculateEmployabilityScore(updatedAnswers, NON_TEST_QUESTIONS_18);
-      totalScore = empRes.finalPercentage;
+    sub.answers = updatedAnswers;
+    if (subQuestions && subQuestions.length > 0) {
+      evaluateSubmissionServerSide(sub, subQuestions);
     }
-    const updatedSub: ExamSubmission = {
-      ...sub,
-      answers: updatedAnswers,
-      autoScore,
-      essayScore,
-      totalScore,
-      technicalScore: isTechnicalExam ? totalScore : 0,
-      employabilityScore: isEmployabilityExam ? totalScore : 0,
-      originalAIScoreTotal: totalScore,
-      teacherScoreTotal: totalScore,
-      status: 'dinilai',
-      aiGradingStatus: 'completed',
-      aiGradedAt: new Date().toISOString(),
-      aiEvaluation: JSON.stringify(essayEvaluations),
-      validationStatus: 'approved',
-      validatedBy: 'Evaluasi Otomatis AI (Ditinjau Guru)'
-    };
+    sub.originalAIScoreTotal = sub.totalScore;
+    sub.teacherScoreTotal = sub.totalScore;
+    sub.aiEvaluation = JSON.stringify(essayEvaluations);
+    sub.aiGradedAt = new Date().toISOString();
+    sub.aiGradingStatus = anyServiceFailed ? 'failed' : 'completed';
+    if (!sub.validatedBy && sub.validationStatus !== 'approved' && sub.validationStatus !== 'revised') {
+      sub.requiresTeacherReview = true;
+      sub.status = 'perlu_pemeriksaan';
+      sub.validationStatus = 'pending_review';
+    }
+    sub.teacherFollowUp = anyServiceFailed
+      ? 'Penilaian otomatis AI tertunda (layanan offline atau API Key belum terpasang). Jawaban siswa tersimpan utuh dan menunggu penilaian langsung oleh Guru.'
+      : 'Penilaian otomatis AI telah selesai sesuai rubrik. Menunggu validasi atau revisi nilai oleh guru penguji.';
 
-    db.submissions[subIdx] = updatedSub;
     saveDb();
+    console.log(`[Auto-AI] Evaluasi AI selesai untuk ${sub.studentName} (${sub.id}). Status: ${sub.aiGradingStatus}, Total Skor: ${sub.totalScore}/100`);
+    return sub;
+  } catch (err: any) {
+    console.error(`[Auto-AI] Pengecualian evaluasi AI pada submission ${submissionId}:`, err);
+    sub.aiGradingStatus = 'failed';
+    sub.requiresTeacherReview = true;
+    sub.status = 'perlu_pemeriksaan';
+    sub.validationStatus = 'pending_review';
+    saveDb();
+    return sub;
+  }
+}
 
-    res.json({
+// Endpoint Penilaian Manual oleh Guru (Tombol "Nilai Ulang dengan AI")
+app.post("/api/ai/evaluate-submission/:submissionId", async (req: Request, res: Response) => {
+  try {
+    const { submissionId } = req.params;
+    const updatedSub = await processSubmissionAIEvaluation(submissionId, true);
+    if (!updatedSub) {
+      return res.status(404).json({ success: false, error: "Submission tidak ditemukan." });
+    }
+    return res.json({
       success: true,
       submission: updatedSub,
-      message: "Evaluasi AI terhadap esai dan bukti multimodal berhasil dijalankan."
+      message: "Penilaian AI terhadap esai dan bukti multimodal berhasil dijalankan."
     });
   } catch (err: any) {
     console.error("Error in evaluate-submission:", err);

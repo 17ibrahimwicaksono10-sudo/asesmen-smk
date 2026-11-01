@@ -60,7 +60,8 @@ export type QuestionType =
   | 'short_answer'
   | 'essay'
   | 'essay_subquestions'
-  | 'scenario_assessment';
+  | 'scenario_assessment'
+  | 'analisis_kasus';
 
 export interface SubQuestion {
   id: string;
@@ -73,6 +74,7 @@ export interface SubQuestion {
 export interface StatementItem {
   id: string;
   text: string;
+  statement?: string;
   options: string[]; // e.g. ['Sesuai', 'Tidak Sesuai'] or ['Tepat', 'Tidak Tepat'] or ['Benar', 'Salah']
   correctAnswer: string;
 }
@@ -119,6 +121,11 @@ export interface QuestionItem {
   subQuestions?: SubQuestion[];
   points?: number;
   maxScore?: number;
+  requiresMultimodal?: boolean;
+  allowedEvidenceTypes?: string[];
+  instructions?: string;
+  contextText?: string;
+  dataTables?: any[];
 }
 
 export interface QuestionPackage {
@@ -165,7 +172,7 @@ export interface Exam {
 
 export type AIGradingStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
-export type ModalityType = 'audio' | 'handwriting' | 'document';
+export type ModalityType = 'audio' | 'handwriting' | 'document' | 'tulisan_tangan' | 'image';
 
 export interface UnreadableFlag {
   segment: string;
@@ -351,6 +358,8 @@ export interface ExamSubmission {
   allowRetake?: boolean;
   answers: Record<string, StudentAnswer>;
   totalScore: number;
+  rawScoreTotal?: number;
+  maxRawScore?: number;
   technicalScore: number;
   employabilityScore: number;
   autoScore?: number;

@@ -13,8 +13,29 @@
  *   wajib ditandai status 'perlu_review_guru' dengan requires_teacher_review: true.
  */
 
+import fs from "fs";
+import path from "path";
 import { GoogleGenAI } from "@google/genai";
-import { getDb } from "./db";
+import { getDb, getEvidenceStorageDir } from "./db";
+
+export function resolveMediaBase64(mediaDataOrUrl?: string): string {
+  if (!mediaDataOrUrl) return '';
+  if (mediaDataOrUrl.startsWith('data:') || mediaDataOrUrl.length > 500) {
+    return mediaDataOrUrl;
+  }
+  try {
+    const filename = path.basename(mediaDataOrUrl);
+    const storageDir = getEvidenceStorageDir();
+    const filePath = path.join(storageDir, filename);
+    if (fs.existsSync(filePath)) {
+      const buf = fs.readFileSync(filePath);
+      return buf.toString('base64');
+    }
+  } catch (err) {
+    console.warn('[AI Router] Error resolving media file:', err);
+  }
+  return mediaDataOrUrl;
+}
 
 export type AssessmentInputType = 'typed_text' | 'image_upload' | 'microphone_audio';
 
@@ -261,10 +282,11 @@ export async function evaluateImageWithGeminiVision(
     prompt_version: 'v3.0-gemini-vision-direct'
   };
 
-  if (!rawImageData) {
+  const resolvedMedia = resolveMediaBase64(rawImageData);
+  if (!resolvedMedia) {
     return {
       ...baseResult,
-      feedback: 'Tidak ada berkas gambar yang dilampirkan.',
+      feedback: 'Tidak ada berkas gambar yang dilampirkan atau berkas tidak ditemukan di penyimpanan.',
       scoring_reason: 'Berkas bukti gambar kosong.',
       assessment_status: 'perlu_review_guru',
       requires_teacher_review: true
@@ -281,9 +303,9 @@ export async function evaluateImageWithGeminiVision(
     };
   }
 
-  const base64Clean = rawImageData.replace(/^data:[^;]+;base64,/, '');
-  const cleanMime = rawImageData.startsWith('data:')
-    ? rawImageData.split(';')[0].replace('data:', '')
+  const base64Clean = resolvedMedia.replace(/^data:[^;]+;base64,/, '');
+  const cleanMime = resolvedMedia.startsWith('data:')
+    ? resolvedMedia.split(';')[0].replace('data:', '')
     : mimeType;
 
   const prompt = `
@@ -433,10 +455,11 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
     prompt_version: 'v3.0-audio-stt-deepseek'
   };
 
-  if (!rawAudioData) {
+  const resolvedMedia = resolveMediaBase64(rawAudioData);
+  if (!resolvedMedia) {
     return {
       ...baseResult,
-      feedback: 'Tidak ada berkas rekaman audio yang dilampirkan.',
+      feedback: 'Tidak ada berkas rekaman audio yang dilampirkan atau berkas tidak ditemukan di penyimpanan.',
       scoring_reason: 'Berkas audio kosong.',
       assessment_status: 'perlu_review_guru',
       requires_teacher_review: true
@@ -453,9 +476,9 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
     };
   }
 
-  const base64Clean = rawAudioData.replace(/^data:[^;]+;base64,/, '');
-  const cleanMime = rawAudioData.startsWith('data:')
-    ? rawAudioData.split(';')[0].replace('data:', '')
+  const base64Clean = resolvedMedia.replace(/^data:[^;]+;base64,/, '');
+  const cleanMime = resolvedMedia.startsWith('data:')
+    ? resolvedMedia.split(';')[0].replace('data:', '')
     : mimeType;
 
   // TAHAP 1: GEMINI HANYA UNTUK STT (SPEECH-TO-TEXT)
