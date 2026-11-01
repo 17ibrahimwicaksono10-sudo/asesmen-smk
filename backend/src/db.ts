@@ -47,6 +47,11 @@ export interface DatabaseSchema {
 
 // Fungsi helper untuk menemukan lokasi path database.json yang konsisten
 export function getDatabasePaths(): { targetDir: string; targetFile: string } {
+  if (process.env.VOC_DATABASE_PATH && process.env.VOC_DATABASE_PATH.trim()) {
+    const customFile = path.resolve(process.env.VOC_DATABASE_PATH.trim());
+    return { targetDir: path.dirname(customFile), targetFile: customFile };
+  }
+
   const candidateDirs = [
     path.resolve(process.cwd(), "backend", "backend", "data"),
     path.resolve(process.cwd(), "backend", "data"),

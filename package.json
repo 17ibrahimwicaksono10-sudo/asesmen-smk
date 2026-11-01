@@ -14,6 +14,9 @@
     "build:backend": "npm run build --workspace=backend",
     "build:frontend": "npm run build --workspace=frontend",
     "start": "npm run start --workspace=backend",
+    "rollback:database": "npm run rollback:database --workspace=backend --",
+    "emergency:reset-password": "npm run emergency:reset-password --workspace=backend --",
+    "migrate:passwords": "npm run migrate:passwords --workspace=backend",
     "install:all": "npm install"
   },
   "devDependencies": {

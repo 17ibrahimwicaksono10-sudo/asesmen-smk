@@ -1,9 +1,10 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { fileURLToPath } from "url";
 import { getDatabasePaths } from "./db";
 
-export function safeRollbackDatabase(backupFilePath: string): {
+export function safeRollbackDatabase(backupFilePath: string, customTargetFile?: string): {
   success: boolean;
   backupFile: string;
   checksumMatched: boolean;
@@ -35,38 +36,97 @@ export function safeRollbackDatabase(backupFilePath: string): {
     console.warn(`[ROLLBACK-DB] Peringatan: File checksum (.sha256) tidak ditemukan. Melanjutkan dengan hash terhitung: ${actualHash}`);
   }
 
-  // 2. Parse data backup
-  const backupData = JSON.parse(backupContent.toString("utf-8"));
+  // 2. Parse data backup (Akan melempar SyntaxError jika file JSON rusak)
+  let backupData: any;
+  try {
+    backupData = JSON.parse(backupContent.toString("utf-8"));
+  } catch (parseErr: any) {
+    throw new Error(`FILE BACKUP RUSAK ATAU BUKAN JSON VALID: ${parseErr.message}`);
+  }
+
   if (!Array.isArray(backupData.submissions)) {
     throw new Error("Format file backup tidak valid: array submissions tidak ditemukan.");
   }
 
-  const { targetFile } = getDatabasePaths();
+  const { targetFile: defaultTarget } = getDatabasePaths();
+  const targetFile = customTargetFile ? path.resolve(customTargetFile) : defaultTarget;
   console.log(`[ROLLBACK-DB] Target database aktif: ${targetFile}`);
 
-  // 3. Periksa database aktif untuk mendeteksi submission baru pasca-backup
+  // 3. Periksa database aktif untuk mendeteksi submission dan entitas baru pasca-backup
   let newSubmissionsToPreserve: any[] = [];
+  let newUsersToPreserve: any[] = [];
+  let newPackagesToPreserve: any[] = [];
+  let newExamsToPreserve: any[] = [];
+  let newClassesToPreserve: any[] = [];
+  let newTeachersToPreserve: any[] = [];
   let preservedFile: string | undefined;
 
   if (fs.existsSync(targetFile)) {
     try {
       const activeRaw = fs.readFileSync(targetFile, "utf-8");
       const activeDb = JSON.parse(activeRaw);
-      const backupSubIds = new Set(backupData.submissions.map((s: any) => s.id));
+      const backupSubIds = new Set((backupData.submissions || []).map((s: any) => s.id));
+      const backupUserIds = new Set((backupData.users || []).map((u: any) => u.id));
+      const backupPkgIds = new Set((backupData.packages || []).map((p: any) => p.id));
+      const backupExamIds = new Set((backupData.exams || []).map((e: any) => e.id));
+      const backupClassIds = new Set((backupData.classes || []).map((c: any) => c.id));
+      const backupTeacherIds = new Set((backupData.teachers || []).map((t: any) => t.id));
 
       if (Array.isArray(activeDb.submissions)) {
         newSubmissionsToPreserve = activeDb.submissions.filter((s: any) => !backupSubIds.has(s.id));
       }
+      if (Array.isArray(activeDb.users)) {
+        newUsersToPreserve = activeDb.users.filter((u: any) => !backupUserIds.has(u.id));
+      }
+      if (Array.isArray(activeDb.packages)) {
+        newPackagesToPreserve = activeDb.packages.filter((p: any) => !backupPkgIds.has(p.id));
+      }
+      if (Array.isArray(activeDb.exams)) {
+        newExamsToPreserve = activeDb.exams.filter((e: any) => !backupExamIds.has(e.id));
+      }
+      if (Array.isArray(activeDb.classes)) {
+        newClassesToPreserve = activeDb.classes.filter((c: any) => !backupClassIds.has(c.id));
+      }
+      if (Array.isArray(activeDb.teachers)) {
+        newTeachersToPreserve = activeDb.teachers.filter((t: any) => !backupTeacherIds.has(t.id));
+      }
 
-      if (newSubmissionsToPreserve.length > 0) {
-        console.log(`[ROLLBACK-DB] Terdeteksi ${newSubmissionsToPreserve.length} submission baru pasca-backup.`);
+      const totalPreserved = newSubmissionsToPreserve.length +
+        newUsersToPreserve.length +
+        newPackagesToPreserve.length +
+        newExamsToPreserve.length +
+        newClassesToPreserve.length +
+        newTeachersToPreserve.length;
+
+      if (totalPreserved > 0) {
+        console.log(`[ROLLBACK-DB] Terdeteksi entitas baru pasca-backup (Total: ${totalPreserved}):`);
+        if (newSubmissionsToPreserve.length > 0) console.log(`  - Submissions baru : ${newSubmissionsToPreserve.length}`);
+        if (newUsersToPreserve.length > 0) console.log(`  - Akun pengguna baru : ${newUsersToPreserve.length}`);
+        if (newPackagesToPreserve.length > 0) console.log(`  - Paket soal baru   : ${newPackagesToPreserve.length}`);
+        if (newExamsToPreserve.length > 0) console.log(`  - Jadwal ujian baru  : ${newExamsToPreserve.length}`);
+        if (newClassesToPreserve.length > 0) console.log(`  - Kelas baru         : ${newClassesToPreserve.length}`);
+
         const timestamp = Date.now();
         preservedFile = `${targetFile}.post_deploy_preserved_${timestamp}.json`;
-        fs.writeFileSync(preservedFile, JSON.stringify(newSubmissionsToPreserve, null, 2), "utf-8");
-        console.log(`[ROLLBACK-DB] Submission baru diamankan ke: ${preservedFile}`);
+        const preservedPayload = {
+          timestamp: new Date().toISOString(),
+          submissions: newSubmissionsToPreserve,
+          users: newUsersToPreserve,
+          packages: newPackagesToPreserve,
+          exams: newExamsToPreserve,
+          classes: newClassesToPreserve,
+          teachers: newTeachersToPreserve,
+        };
+        fs.writeFileSync(preservedFile, JSON.stringify(preservedPayload, null, 2), "utf-8");
+        console.log(`[ROLLBACK-DB] Entitas baru pasca-backup berhasil diamankan ke: ${preservedFile}`);
 
-        // Gabungkan submission baru ke data yang akan di-restore agar tidak hilang
-        backupData.submissions = [...backupData.submissions, ...newSubmissionsToPreserve];
+        // Gabungkan seluruh entitas baru ke data yang akan di-restore agar tidak hilang
+        backupData.submissions = [...(backupData.submissions || []), ...newSubmissionsToPreserve];
+        backupData.users = [...(backupData.users || []), ...newUsersToPreserve];
+        backupData.packages = [...(backupData.packages || []), ...newPackagesToPreserve];
+        backupData.exams = [...(backupData.exams || []), ...newExamsToPreserve];
+        backupData.classes = [...(backupData.classes || []), ...newClassesToPreserve];
+        backupData.teachers = [...(backupData.teachers || []), ...newTeachersToPreserve];
       }
     } catch (readErr: any) {
       console.warn(`[ROLLBACK-DB] Peringatan saat membaca database aktif: ${readErr.message}`);
@@ -80,9 +140,12 @@ export function safeRollbackDatabase(backupFilePath: string): {
     console.log(`[ROLLBACK-DB] Salinan darurat database sebelum rollback disimpan di: ${preRollbackBackup}`);
   }
 
-  // 5. Tulis database hasil restore secara atomik
-  fs.writeFileSync(targetFile, JSON.stringify(backupData, null, 2), "utf-8");
-  console.log(`[ROLLBACK-DB] Database aktif berhasil dipulihkan secara aman dari: ${resolvedBackupPath}`);
+  // 5. Tulis database hasil restore secara atomik (Write to tmp then rename)
+  const tmpFile = `${targetFile}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmpFile, JSON.stringify(backupData, null, 2), "utf-8");
+  fs.renameSync(tmpFile, targetFile);
+
+  console.log(`[ROLLBACK-DB] Database aktif berhasil dipulihkan secara aman dan atomik dari: ${resolvedBackupPath}`);
   console.log(`[ROLLBACK-DB] Total submission saat ini: ${backupData.submissions.length}`);
 
   return {
@@ -97,7 +160,8 @@ export function safeRollbackDatabase(backupFilePath: string): {
 }
 
 // CLI Runner
-if (process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\\/g, "/")}`) {
+const isMain = process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === path.resolve(fileURLToPath(import.meta.url)).toLowerCase();
+if (isMain) {
   const args = process.argv.slice(2);
   if (args.length === 0) {
     console.error("Gunakan: npm run rollback:database -- <path/to/backup.json>");
@@ -105,7 +169,8 @@ if (process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\
   }
 
   try {
-    const result = safeRollbackDatabase(args[0]);
+    const targetDbArg = args[1] || process.env.VOC_DATABASE_PATH;
+    const result = safeRollbackDatabase(args[0], targetDbArg);
     console.log("\n==================================================================");
     console.log("🎉 ROLLBACK DATABASE BERHASIL DILAKUKAN SECARA AMAN!");
     console.log(`- File Sumber                 : ${result.backupFile}`);

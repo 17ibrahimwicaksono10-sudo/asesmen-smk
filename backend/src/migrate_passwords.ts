@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { getDatabasePaths } from "./db";
 import { hashPassword } from "./auth";
 
@@ -71,7 +72,8 @@ export function runPasswordMigration(customDbPath?: string): {
 }
 
 // Eksekusi langsung jika dipanggil via CLI
-if (process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\\/g, "/")}`) {
+const isMain = process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === path.resolve(fileURLToPath(import.meta.url)).toLowerCase();
+if (isMain) {
   try {
     runPasswordMigration();
   } catch (err: any) {

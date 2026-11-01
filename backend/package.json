@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
+    "build": "esbuild src/server.ts src/safe_rollback_database.ts src/emergency_reset_password.ts src/migrate_passwords.ts --bundle --platform=node --format=esm --packages=external --outdir=dist",
     "start": "node dist/server.js",
     "migrate": "tsx src/migrate.ts",
-    "migrate:passwords": "tsx src/migrate_passwords.ts",
+    "migrate:passwords": "node dist/migrate_passwords.js",
     "rollback:evidence": "tsx src/rollback.ts",
-    "rollback:database": "tsx src/safe_rollback_database.ts",
-    "emergency:reset-password": "tsx src/emergency_reset_password.ts",
+    "rollback:database": "node dist/safe_rollback_database.js",
+    "emergency:reset-password": "node dist/emergency_reset_password.js",
+    "dev:rollback:database": "tsx src/safe_rollback_database.ts",
+    "dev:emergency:reset-password": "tsx src/emergency_reset_password.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
