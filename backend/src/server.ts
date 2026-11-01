@@ -514,7 +514,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       (req.user?.email && (s as any).studentEmail?.toLowerCase() === req.user.email.toLowerCase())
     );
   } else if (req.user.role === 'guru') {
-    // Guru hanya menerima submission sekolah / kelas binaannya
+    // Guru hanya menerima submission sekolah & kelas binaannya (Ketat: Larang kebocoran lintas sekolah)
     const isSchoolMatch = (s1?: string, s2?: string) => {
       if (!s1 || !s2) return false;
       const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -522,9 +522,11 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       return c1 === c2 || c1.includes(c2) || c2.includes(c1);
     };
     rawSubmissions = rawSubmissions.filter(s => {
-      return (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
-        (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName)) ||
-        (req.user?.className && s.className && s.className.toLowerCase() === req.user.className.toLowerCase());
+      const matchSchool = (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
+        (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName));
+      if (!matchSchool) return false;
+      if (req.user?.classId && s.classId && req.user.classId !== s.classId) return false;
+      return true;
     });
   }
 
@@ -544,7 +546,9 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       studentName: s.studentName,
       studentNis: s.studentNis,
       studentEmail: s.studentEmail,
+      schoolId: s.schoolId,
       schoolName: s.schoolName,
+      classId: s.classId,
       className: s.className,
       submitTime: s.submitTime,
       totalScore: s.totalScore,
@@ -555,7 +559,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       aiEvaluation: s.aiEvaluation,
       teacherFollowUp: s.teacherFollowUp,
       evidences: safeEvidences,
-      answers: (req.user?.role === 'siswa' && s.studentId === req.user?.userId) ? s.answers : undefined,
+      answers: isTeacherOrAdmin || (req.user?.role === 'siswa' && s.studentId === req.user?.userId) ? s.answers : undefined,
     };
   });
 
@@ -1430,7 +1434,7 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
       (req.user?.name && s.studentName?.toLowerCase() === req.user.name.toLowerCase())
     );
   } else if (req.user?.role === "guru") {
-    // Guru hanya melihat submission sekolah / kelas binaannya
+    // Guru hanya melihat submission sekolah & kelas binaannya (Ketat: Larang kebocoran lintas sekolah)
     const isSchoolMatch = (s1?: string, s2?: string) => {
       if (!s1 || !s2) return false;
       const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1440,8 +1444,9 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
     list = list.filter(s => {
       const matchSchool = (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
         (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName));
-      const matchClass = req.user?.className && s.className && s.className.toLowerCase() === req.user.className.toLowerCase();
-      return matchSchool || matchClass;
+      if (!matchSchool) return false;
+      if (req.user?.classId && s.classId && req.user.classId !== s.classId) return false;
+      return true;
     });
   }
 
@@ -1735,6 +1740,19 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
   } else {
     submission.technicalScore = finalPercentage;
     submission.employabilityScore = 0;
+  }
+
+  const hasSubjective = canonicalQuestions.some(q => q.type === 'essay' || q.type === 'analisis_kasus');
+  const hasMultimodalEvidence = Boolean(
+    (submission.evidences && submission.evidences.length > 0) ||
+    Object.values(submission.answers || {}).some((a: any) => a.multimodalEvidences && a.multimodalEvidences.length > 0)
+  );
+
+  const needsReview = hasSubjective || hasMultimodalEvidence || submission.requiresTeacherReview;
+  if (!submission.validatedBy && submission.validationStatus !== 'approved' && submission.validationStatus !== 'revised') {
+    submission.requiresTeacherReview = Boolean(needsReview);
+    submission.status = needsReview ? 'perlu_pemeriksaan' : 'dinilai';
+    submission.validationStatus = 'pending_review';
   }
 }
 

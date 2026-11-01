@@ -544,7 +544,7 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
     const updated: PortfolioItem = {
       ...item,
       isValidatedByTeacher: isNowValidated,
-      verifiedByTeacher: isNowValidated ? `${currentUser.name} (${currentUser.role.toUpperCase()})` : undefined,
+      verifiedByTeacher: isNowValidated ? `${currentUser?.name} (${(currentUser?.role || 'guru').toUpperCase()})` : undefined,
       validatedAt: isNowValidated ? new Date().toISOString() : undefined
     };
     if (previewPdfItem && previewPdfItem.id === item.id) {
@@ -1103,7 +1103,7 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
       isTeacherValidated: true,
       teacherApprovalStatus,
       teacherNotes: teacherNotesInput.trim(),
-      validatedBy: `${currentUser.name} (${currentUser.role.toUpperCase()})`,
+      validatedBy: `${currentUser?.name} (${(currentUser?.role || 'guru').toUpperCase()})`,
       validatedAt: new Date().toLocaleString('id-ID')
     };
 

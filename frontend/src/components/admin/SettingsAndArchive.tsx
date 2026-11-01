@@ -36,18 +36,18 @@ interface SettingsAndArchiveProps {
 const DEFAULT_PROVIDERS: AIProviderConfig[] = [
   {
     id: 'prov-deepseek-flash',
-    name: 'Deepseek v4 Flash',
+    name: 'DeepSeek Chat (V3)',
     type: 'Deepseek',
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-chat',
     apiKey: 'sk-987d****************',
     baseUrl: 'https://api.deepseek.com',
     status: 'Active'
   },
   {
     id: 'prov-deepseek-pro',
-    name: 'Deepseek v4 Pro',
+    name: 'DeepSeek Reasoner (R1)',
     type: 'Deepseek',
-    model: 'deepseek-v4-pro',
+    model: 'deepseek-reasoner',
     apiKey: 'sk-987d****************',
     baseUrl: 'https://api.deepseek.com',
     status: 'Active'
@@ -108,7 +108,7 @@ export const SettingsAndArchive: React.FC<SettingsAndArchiveProps> = ({
   }>({
     name: '',
     type: 'Deepseek',
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-chat',
     apiKey: '',
     baseUrl: 'https://api.deepseek.com',
     status: 'Active'
@@ -126,7 +126,7 @@ export const SettingsAndArchive: React.FC<SettingsAndArchiveProps> = ({
     setProviderForm({
       name: '',
       type: 'Deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-chat',
       apiKey: '',
       baseUrl: 'https://api.deepseek.com',
       status: 'Active'
@@ -879,7 +879,7 @@ export const SettingsAndArchive: React.FC<SettingsAndArchiveProps> = ({
                 <input
                   type="text"
                   required
-                  placeholder="Contoh: deepseek-v4-flash / gemini-2.5-flash"
+                  placeholder="Contoh: deepseek-chat / gemini-2.5-flash"
                   value={providerForm.model}
                   onChange={(e) => setProviderForm({ ...providerForm, model: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500 font-mono"

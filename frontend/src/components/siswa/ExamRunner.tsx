@@ -12,7 +12,9 @@ interface ExamRunnerProps {
   studentName: string;
   studentNis: string;
   studentEmail?: string;
+  schoolId?: string;
   schoolName?: string;
+  classId?: string;
   className: string;
   onSubmitExam: (submission: ExamSubmission) => Promise<void> | void;
   onCancelExam: () => void;
@@ -25,7 +27,9 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
   studentName,
   studentNis,
   studentEmail,
+  schoolId,
   schoolName,
+  classId,
   className,
   onSubmitExam,
   onCancelExam
@@ -482,8 +486,8 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         }
       } else if (q.type === 'complex_mcq') {
         if (Array.isArray(qAns.selectedOptions)) {
-          const studentLetters = qAns.selectedOptions.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
-          const correctLetters = (q.correctAnswers || []).map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
+          const studentLetters = qAns.selectedOptions.map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
+          const correctLetters = (q.correctAnswers || []).map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
           let matchCount = 0;
           studentLetters.forEach((letter: string) => {
             if (correctLetters.includes(letter)) matchCount++;
@@ -594,7 +598,9 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       return hasEv && noText;
     });
 
-    const requiresReview = hasWarningOrFlag || hasUnprocessedEvidence || hasAnyEvidenceWithoutText;
+    const hasSubjectiveQuestions = activeQuestions.some(q => q.type === 'essay' || q.type === 'analisis_kasus');
+    const hasMultimodalEvidence = allEvidences.length > 0;
+    const requiresReview = hasWarningOrFlag || hasUnprocessedEvidence || hasAnyEvidenceWithoutText || hasSubjectiveQuestions || hasMultimodalEvidence;
 
     const isTechnicalExam = !isEmployabilityExam;
     const finalTechScore = isTechnicalExam ? scoreResult.finalPercentage : 0;
@@ -610,8 +616,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       studentName,
       studentNis,
       studentEmail,
-      schoolName,
-      className,
+      schoolId: schoolId || exam.schoolId,
+      schoolName: schoolName || exam.schoolName,
+      classId: classId || exam.classId,
+      className: className || exam.className,
       submitTime: new Date().toISOString(),
       answers: enrichedAnswers,
       totalScore: isEmployabilityExam ? (empResult ? empResult.finalPercentage : scoreResult.finalPercentage) : scoreResult.finalPercentage,
@@ -619,6 +627,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       employabilityScore: finalEmpScore,
       status: requiresReview ? 'perlu_pemeriksaan' : 'dinilai',
       requiresTeacherReview: requiresReview,
+      validationStatus: 'pending_review',
       evidences: allEvidences,
       aiEvaluation: isTechnicalExam
         ? `Skor Total Mentah: ${scoreResult.totalRawScore}/${scoreResult.maxRawScore || 65} (${scoreResult.finalPercentage}%). Terdiri atas seluruh butir kemampuan teknis kimia sesuai rubrik penskoran standar.`

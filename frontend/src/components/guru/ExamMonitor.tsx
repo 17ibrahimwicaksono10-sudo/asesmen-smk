@@ -112,15 +112,31 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
     return matchSchool && matchClass;
   });
 
-  const filteredSubmissions = submissions.filter(s => {
-    const matchSchool = selectedSchoolId === 'ALL' || s.schoolId === selectedSchoolId || (s.schoolName && schoolsList.find(sch => sch.id === selectedSchoolId)?.name && s.schoolName.toLowerCase() === schoolsList.find(sch => sch.id === selectedSchoolId)?.name.toLowerCase());
-    const matchClass = selectedClassId === 'ALL' || s.classId === selectedClassId || (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase());
+  const isSubmissionMatchingFilters = (s: ExamSubmission) => {
+    const selectedSchoolObj = schoolsList.find(sch => sch.id === selectedSchoolId);
+    const matchSchool = selectedSchoolId === 'ALL' || 
+      s.schoolId === selectedSchoolId || 
+      (selectedSchoolObj && isSchoolMatch(s.schoolName, selectedSchoolObj.name)) ||
+      (guruSchool && isSchoolMatch(s.schoolName, guruSchool.name)) ||
+      (currentUser?.schoolName && isSchoolMatch(s.schoolName, currentUser.schoolName)) ||
+      (!s.schoolId && !s.schoolName);
+
+    const matchClass = selectedClassId === 'ALL' || 
+      s.classId === selectedClassId || 
+      (availableClasses.length === 0) ||
+      (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase());
+
     const matchExam = selectedExamId === 'ALL' || s.examId === selectedExamId;
 
-    if (!matchSchool || !matchClass || !matchExam) return false;
+    return matchSchool && matchClass && matchExam;
+  };
 
-    const isPending = s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview;
-    const isValidated = (s.status === 'dinilai' || s.validationStatus === 'approved' || s.validationStatus === 'revised') && !s.requiresTeacherReview;
+  const filteredSubmissions = submissions.filter(s => {
+    if (!isSubmissionMatchingFilters(s)) return false;
+
+    const isGuruValidated = s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
+    const isPending = !isGuruValidated && (s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview);
+    const isValidated = isGuruValidated;
 
     if (filterTab === 'PENDING') return isPending;
     if (filterTab === 'VALIDATED') return isValidated;
@@ -128,17 +144,14 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
   });
 
   const pendingCount = submissions.filter(s => {
-    const matchSchool = selectedSchoolId === 'ALL' || s.schoolId === selectedSchoolId || (s.schoolName && schoolsList.find(sch => sch.id === selectedSchoolId)?.name && s.schoolName.toLowerCase() === schoolsList.find(sch => sch.id === selectedSchoolId)?.name.toLowerCase());
-    const matchClass = selectedClassId === 'ALL' || s.classId === selectedClassId || (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase());
-    const matchExam = selectedExamId === 'ALL' || s.examId === selectedExamId;
-    return matchSchool && matchClass && matchExam && (s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview);
+    if (!isSubmissionMatchingFilters(s)) return false;
+    const isGuruValidated = s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
+    return !isGuruValidated && (s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview);
   }).length;
 
   const validatedCount = submissions.filter(s => {
-    const matchSchool = selectedSchoolId === 'ALL' || s.schoolId === selectedSchoolId || (s.schoolName && schoolsList.find(sch => sch.id === selectedSchoolId)?.name && s.schoolName.toLowerCase() === schoolsList.find(sch => sch.id === selectedSchoolId)?.name.toLowerCase());
-    const matchClass = selectedClassId === 'ALL' || s.classId === selectedClassId || (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase());
-    const matchExam = selectedExamId === 'ALL' || s.examId === selectedExamId;
-    return matchSchool && matchClass && matchExam && ((s.status === 'dinilai' || s.validationStatus === 'approved' || s.validationStatus === 'revised') && !s.requiresTeacherReview);
+    if (!isSubmissionMatchingFilters(s)) return false;
+    return s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
   }).length;
 
   const activeExamObj = exams.find(e => e.id === selectedExamId);
@@ -282,7 +295,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
             >
               <option value="ALL">Semua Sesi Ujian ({availableExams.length})</option>
               {availableExams.map(e => (
-                <option key={e.id} value={e.id}>{e.title} ({e.className}) - [{e.status.toUpperCase()}]</option>
+                <option key={e.id} value={e.id}>{e.title} ({e.className || 'Semua Kelas'}) - [{(e.status || 'draft').toUpperCase()}]</option>
               ))}
             </select>
           </div>
@@ -371,15 +384,29 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <h4 className="text-sm font-bold text-white">{sub.studentName}</h4>
-                        {isPending ? (
-                          <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold">
-                            Perlu Periksa
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
-                            Tervalidasi
-                          </span>
-                        )}
+                        {(() => {
+                          const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
+                          const isNeedsReview = !isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.validationStatus === 'pending_review' || sub.requiresTeacherReview);
+                          if (isGuruValidated) {
+                            return (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
+                                Tervalidasi Guru {sub.validatedBy ? `(${sub.validatedBy.split(' ')[0]})` : ''}
+                              </span>
+                            );
+                          }
+                          if (isNeedsReview) {
+                            return (
+                              <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold">
+                                Perlu Review Guru
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[10px] font-bold">
+                              Dinilai Sistem (Otomatis)
+                            </span>
+                          );
+                        })()}
                       </div>
                       <p className="text-xs text-slate-400">NIS: {sub.studentNis} • Kelas: {sub.className}</p>
                     </div>
@@ -387,7 +414,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                     <div className="text-right">
                       {(() => {
                         const subRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
-                        const subMaxRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0);
+                        const subMaxRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (sub.maxRawScore || 65);
                         return (
                           <>
                             <div className="flex items-baseline justify-end gap-0.5">
@@ -395,7 +422,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               <span className="text-[10px] text-slate-400">/ 100</span>
                             </div>
                             <div className="text-[10px] text-slate-400 font-medium">
-                              Nilai Final {subMaxRawSum === 90 ? `(${subRawSum}/90 Poin)` : `(${subRawSum} Poin)`}
+                              Skor Mentah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong>
                             </div>
                           </>
                         );
@@ -406,8 +433,8 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                   {/* Non-destructive score history tag */}
                   {hasScoreEdited && (
                     <div className="mt-2 text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-800/40 flex justify-between">
-                      <span>Nilai Awal AI: <strong className="line-through text-slate-400">{originalAiScore}</strong></span>
-                      <span>Nilai Guru: <strong className="text-emerald-400 font-bold">{sub.teacherScoreTotal}</strong></span>
+                      <span>Nilai Awal AI: <strong className="line-through text-slate-400">{originalAiScore} / 100</strong></span>
+                      <span>Nilai Guru: <strong className="text-emerald-400 font-bold">{sub.teacherScoreTotal} / 100</strong></span>
                     </div>
                   )}
 
@@ -665,9 +692,9 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               const letter = String.fromCharCode(65 + optIdx);
                               const score = (qItem as any).scoringMap?.[letter] || (opt === qItem.correctAnswer ? 1 : 0);
 
-                              const studentClean = (ans.selectedOption || '').trim().toUpperCase();
-                              const optClean = (opt || '').trim().toUpperCase();
-                              const correctClean = (qItem.correctAnswer || '').trim().toUpperCase();
+                              const studentClean = (typeof ans.selectedOption === 'string' ? ans.selectedOption : String(ans.selectedOption || '')).trim().toUpperCase();
+                              const optClean = (typeof opt === 'string' ? opt : (opt ? String((opt as any).text || (opt as any).label || opt) : '')).trim().toUpperCase();
+                              const correctClean = (typeof qItem.correctAnswer === 'string' ? qItem.correctAnswer : String(qItem.correctAnswer || '')).trim().toUpperCase();
 
                               const isStudentPick = studentClean === optClean ||
                                 (studentClean.length === 1 && (studentClean === letter || optClean.startsWith(studentClean))) ||
@@ -1058,8 +1085,15 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
                 <div className="flex items-center gap-3">
                   <div className="text-right px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-[10px] text-slate-400 uppercase font-semibold">Total Nilai Siswa</div>
-                    <div className="text-lg font-black text-emerald-400">{selectedSubmission.totalScore} Poin</div>
+                    <div className="text-[10px] text-slate-400 uppercase font-semibold">Nilai Akhir (Skala 100)</div>
+                    <div className="text-lg font-black text-emerald-400">{selectedSubmission.totalScore} / 100</div>
+                    {(() => {
+                      const mRaw = Object.values(selectedSubmission.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
+                      const mMax = Object.values(selectedSubmission.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (selectedSubmission.maxRawScore || 65);
+                      return (
+                        <div className="text-[10px] text-slate-400">Skor Mentah: {mRaw} / {mMax} Poin</div>
+                      );
+                    })()}
                   </div>
 
                   <button
