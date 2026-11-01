@@ -372,6 +372,11 @@ export interface ExamSubmission {
   validatedAt?: string;          // Timestamp of teacher validation
   aiGradingStatus?: AIGradingStatus;
   aiGradedAt?: string;
+  aiGradingAttempts?: number;
+  aiGradingLastAttemptAt?: string;
+  aiGradingNextRetryAt?: string;
+  aiGradingError?: string;
+  aiGradingLockedAt?: string;
   teacherFollowUp?: string;
   aiEvaluation?: string;
   evidences?: MultimodalEvidence[];

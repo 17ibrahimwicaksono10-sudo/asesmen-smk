@@ -30,6 +30,7 @@ import {
   QuestionEvaluationContext,
   StandardAIEvaluationResult
 } from "./aiEvaluationRouter";
+import { aiQueueManager } from "./aiEvaluationQueue";
 
 
 export function reloadEnv(): void {
@@ -250,6 +251,7 @@ app.get("/api/health", (_req: Request, res: Response) => {
     deepseekEnabled: deepseekReady,
     deepseekKeyConfigured: Boolean(settings?.deepseekApiKey || process.env.DEEPSEEK_API_KEY),
     activeAiProvider: deepseekReady ? "deepseek" : "gemini",
+    aiQueue: aiQueueManager.getStatus(),
     port: PORT,
   });
 });
@@ -1773,6 +1775,8 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
   }
 }
 
+aiQueueManager.setScoreRecalculator(evaluateSubmissionServerSide);
+
 // 5. POST /api/submissions: Pengumpulan Ujian Idempoten (Anti-Duplikasi, Anti-Base64, Anti-Penimpaan)
 app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
@@ -1967,13 +1971,11 @@ app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Resp
   saveDb();
   res.json({ success: true, submission });
 
-  // Pemicu Penilaian AI Otomatis (Background Async Non-Blocking & Anti-Duplikasi)
+  // Pemicu Penilaian AI Otomatis (Persistent Queue, Concurrency Limiter, & Anti-Duplikasi)
   const isSubmissionCompleted = submission.status === 'dinilai' || submission.status === 'perlu_pemeriksaan';
   if (isSubmissionCompleted) {
-    setImmediate(() => {
-      processSubmissionAIEvaluation(submission.id, false).catch(err => {
-        console.warn(`[Auto-AI] Background evaluation warning for ${submission.id}:`, err.message);
-      });
+    aiQueueManager.enqueue(submission.id, false).catch(err => {
+      console.warn(`[Auto-AI] Queue enqueue warning for ${submission.id}:`, err.message);
     });
   }
 });
@@ -3240,204 +3242,16 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
 
 // -------------------------------------------------------------
 // -------------------------------------------------------------
+// -------------------------------------------------------------
 // Engine Penilaian AI Otomatis EmployaSkills (Esai, Foto, Audio)
-// - Ketikan -> Strictly DeepSeek API (evaluateTypedEssayWithDeepSeek)
-// - Foto -> Strictly Gemini Vision Multimodal (evaluateImageWithGeminiVision)
-// - Audio -> Gemini STT dilanjutkan DeepSeek (evaluateAudioWithGeminiSTTAndDeepSeek)
+// Menggunakan aiQueueManager untuk ketahanan proses, pemulihan restart,
+// batas konkurensi (concurrency limiter), dan proteksi skor non-0.
 // -------------------------------------------------------------
 export async function processSubmissionAIEvaluation(
   submissionId: string,
   forceRetry: boolean = false
 ): Promise<ExamSubmission | null> {
-  const db = getDb();
-  const subIdx = db.submissions.findIndex(s => s.id === submissionId);
-  if (subIdx < 0) {
-    console.warn(`[Auto-AI] Submission ${submissionId} tidak ditemukan.`);
-    return null;
-  }
-
-  const sub = db.submissions[subIdx];
-
-  // Anti-duplikasi & hemat API: Jika sudah dinilai, sedang diproses, atau tervalidasi guru, lewati kecuali diminta eksplisit
-  if (!forceRetry && (sub.aiGradingStatus === 'processing' || sub.aiGradingStatus === 'completed' || sub.validationStatus === 'approved' || sub.validationStatus === 'revised')) {
-    console.log(`[Auto-AI] Submission ${submissionId} (${sub.studentName}) sudah berstatus '${sub.aiGradingStatus || sub.validationStatus}'. Mengabaikan evaluasi otomatis duplikat.`);
-    return sub;
-  }
-
-  // Tandai status proses AI sedang berlangsung
-  sub.aiGradingStatus = 'processing';
-  saveDb();
-
-  try {
-    const exam = db.exams?.find(e => e.id === sub.examId);
-    const pkg = db.packages?.find(p => p.id === exam?.packageId);
-    const subQuestions: QuestionItem[] = (Array.isArray(sub.questionSnapshot) && sub.questionSnapshot.length > 0)
-      ? sub.questionSnapshot
-      : ((Array.isArray(exam?.questionSnapshot) && exam.questionSnapshot.length > 0)
-        ? exam.questionSnapshot
-        : (pkg?.questions || []));
-
-    const SUBJECTIVE_TYPES = ['essay', 'short_answer', 'essay_subquestions', 'scenario_assessment', 'analisis_kasus'];
-    const updatedAnswers = { ...(sub.answers || {}) };
-    let essayEvaluations: Record<string, any> = {};
-    try {
-      if (sub.aiEvaluation && sub.aiEvaluation.startsWith('{')) {
-        essayEvaluations = JSON.parse(sub.aiEvaluation);
-      }
-    } catch {}
-
-    let anyServiceFailed = false;
-
-    for (const q of subQuestions) {
-      if (!SUBJECTIVE_TYPES.includes(q.type)) {
-        continue;
-      }
-
-      const qAns = updatedAnswers[q.id] || { questionId: q.id };
-      const qMax = q.maxScore || q.points || 5;
-
-      const context: QuestionEvaluationContext = {
-        questionId: q.id,
-        attemptId: sub.id,
-        questionText: q.questionText,
-        answerKey: q.sampleAnswer || q.correctAnswer || (q.subQuestions ? q.subQuestions.map((sq: any) => `${sq.text || sq.prompt}: ${sq.answerKey}`).join('\n') : ''),
-        rubricGuide: q.rubricGuide || 'Penilaian ketepatan konsep kimia analitik, prosedur K3, dan sistematika kerja laboratorium',
-        rubricComponents: q.rubricComponents || [
-          { name: 'Ketepatan Konsep', maxPoints: Math.ceil(qMax * 0.4), criteria: 'Kesesuaian teori dan prinsip ilmiah' },
-          { name: 'Prosedur & K3', maxPoints: Math.ceil(qMax * 0.3), criteria: 'Sistematika kerja dan kepatuhan K3' },
-          { name: 'Analisis & Kesimpulan', maxPoints: Math.floor(qMax * 0.3), criteria: 'Ketajaman penalaran data' },
-        ],
-        maxScore: qMax,
-      };
-
-      // Kumpulkan berkas bukti multimodal yang terikat pada soal ini
-      const evidencesThisQ: MultimodalEvidence[] = [
-        ...((qAns.multimodalEvidences || []).filter((e: any) => e.questionId === q.id || !e.questionId)),
-        ...((sub.evidences || []).filter((e: any) => e.questionId === q.id))
-      ];
-
-      const audioEv = evidencesThisQ.find((e: any) => e.modalityType === 'audio');
-      const imageEv = evidencesThisQ.find((e: any) => e.modalityType === 'handwriting' || e.modalityType === 'image');
-
-      let evalResult: StandardAIEvaluationResult;
-
-      // 1. JALUR REKAMAN MIKROFON: Gemini STT -> DeepSeek Grading
-      if (audioEv) {
-        const audioData = audioEv.fileData || audioEv.storagePath || audioEv.storageUrl;
-        const mime = audioEv.mimeType || 'audio/webm';
-        evalResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, audioData || '', mime);
-        if (evalResult.transcription_or_extraction && (!audioEv.extractedText || audioEv.extractedText.startsWith('['))) {
-          audioEv.extractedText = evalResult.transcription_or_extraction;
-          audioEv.extractionStatus = 'completed';
-        }
-      }
-      // 2. JALUR BUKTI FOTO TULISAN TANGAN: Gemini Vision Multimodal
-      else if (imageEv) {
-        const imgData = imageEv.fileData || imageEv.storagePath || imageEv.storageUrl;
-        const mime = imageEv.mimeType || 'image/jpeg';
-        evalResult = await evaluateImageWithGeminiVision(context, imgData || '', mime);
-        if (evalResult.transcription_or_extraction && (!imageEv.extractedText || imageEv.extractedText.startsWith('['))) {
-          imageEv.extractedText = evalResult.transcription_or_extraction;
-          imageEv.extractionStatus = 'completed';
-        }
-      }
-      // 3. JALUR JAWABAN KETIKAN SISWA: DeepSeek API
-      else {
-        let typedText = (qAns.essayAnswer || '').trim();
-        if (qAns.subQuestionAnswers && Object.keys(qAns.subQuestionAnswers).length > 0) {
-          const subText = Object.entries(qAns.subQuestionAnswers).map(([k, v]) => `[Sub ${k}]: ${v}`).join('\n');
-          typedText += (typedText ? '\n' : '') + subText;
-        }
-        if (qAns.shortAnswerText || qAns.shortAnswerCalculation) {
-          typedText += (typedText ? '\n' : '') + `[Jawaban]: ${qAns.shortAnswerText || ''} | [Langkah Hitung]: ${qAns.shortAnswerCalculation || ''}`;
-        }
-        evalResult = await evaluateTypedEssayWithDeepSeek(context, typedText);
-      }
-
-      // Deteksi kegagalan layanan AI atau ketiadaan API key
-      const isFailedOrOffline = evalResult.assessment_status === 'failed' ||
-        evalResult.assessment_status === 'perlu_review_guru' ||
-        evalResult.scoring_reason?.includes('belum dikonfigurasi') ||
-        evalResult.scoring_reason?.includes('Pengecualian') ||
-        evalResult.requires_teacher_review;
-
-      if (isFailedOrOffline) {
-        anyServiceFailed = true;
-      }
-
-      // Aturan #8: Pastikan jika API key belum tersedia atau API gagal, jawaban siswa tetap tersimpan dan statusnya menjadi Perlu Review Guru, bukan otomatis memperoleh nilai 0 final.
-      let finalQScore = qAns.score !== undefined ? qAns.score : Math.round(qMax * 0.75);
-      if (!isFailedOrOffline && evalResult.total_score !== undefined) {
-        finalQScore = Math.min(qMax, Math.max(0, evalResult.total_score));
-      }
-      qAns.score = finalQScore;
-      qAns.maxScore = qMax;
-      qAns.teacherFeedback = evalResult.feedback || qAns.teacherFeedback;
-      qAns.aiRubricScoring = {
-        evaluatedAt: evalResult.evaluated_at,
-        modelUsed: evalResult.model_used,
-        promptVersion: evalResult.prompt_version,
-        totalScoreGiven: finalQScore,
-        maxTotalScore: evalResult.maximum_score || qMax,
-        scoresPerIndicator: (evalResult.rubric_scores || []).map(r => ({
-          indicatorName: r.indicator,
-          maxPoints: r.maxScore,
-          scoreGiven: r.score,
-          rationale: r.feedback || ''
-        })),
-        evidenceHighlights: [],
-        confidenceStatus: evalResult.requires_teacher_review ? 'Ragu / Perlu Review Guru' : 'Sangat Yakin',
-        confidenceLevel: evalResult.requires_teacher_review ? 'low' : 'high',
-        uncertaintyReason: evalResult.scoring_reason,
-        requiresTeacherReview: evalResult.requires_teacher_review,
-        constructiveFeedback: evalResult.feedback,
-        keyMasteredConcepts: [],
-        areasForImprovement: []
-      };
-
-      essayEvaluations[q.id] = {
-        score: finalQScore,
-        maxScore: qMax,
-        feedback: evalResult.feedback,
-        reason: evalResult.scoring_reason,
-        modelUsed: evalResult.model_used,
-        requiresTeacherReview: evalResult.requires_teacher_review,
-        status: evalResult.assessment_status
-      };
-
-      updatedAnswers[q.id] = qAns;
-    }
-
-    sub.answers = updatedAnswers;
-    if (subQuestions && subQuestions.length > 0) {
-      evaluateSubmissionServerSide(sub, subQuestions);
-    }
-    sub.originalAIScoreTotal = sub.totalScore;
-    sub.teacherScoreTotal = sub.totalScore;
-    sub.aiEvaluation = JSON.stringify(essayEvaluations);
-    sub.aiGradedAt = new Date().toISOString();
-    sub.aiGradingStatus = anyServiceFailed ? 'failed' : 'completed';
-    if (!sub.validatedBy && sub.validationStatus !== 'approved' && sub.validationStatus !== 'revised') {
-      sub.requiresTeacherReview = true;
-      sub.status = 'perlu_pemeriksaan';
-      sub.validationStatus = 'pending_review';
-    }
-    sub.teacherFollowUp = anyServiceFailed
-      ? 'Penilaian otomatis AI tertunda (layanan offline atau API Key belum terpasang). Jawaban siswa tersimpan utuh dan menunggu penilaian langsung oleh Guru.'
-      : 'Penilaian otomatis AI telah selesai sesuai rubrik. Menunggu validasi atau revisi nilai oleh guru penguji.';
-
-    saveDb();
-    console.log(`[Auto-AI] Evaluasi AI selesai untuk ${sub.studentName} (${sub.id}). Status: ${sub.aiGradingStatus}, Total Skor: ${sub.totalScore}/100`);
-    return sub;
-  } catch (err: any) {
-    console.error(`[Auto-AI] Pengecualian evaluasi AI pada submission ${submissionId}:`, err);
-    sub.aiGradingStatus = 'failed';
-    sub.requiresTeacherReview = true;
-    sub.status = 'perlu_pemeriksaan';
-    sub.validationStatus = 'pending_review';
-    saveDb();
-    return sub;
-  }
+  return aiQueueManager.processSubmission(submissionId, forceRetry);
 }
 
 // Endpoint Penilaian Manual oleh Guru (Tombol "Nilai Ulang dengan AI")
@@ -3849,5 +3663,16 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend API Server running at http://localhost:${PORT}`);
   console.log(`API Health: http://localhost:${PORT}/api/health`);
   console.log(`Database initialized at backend/data/database.json`);
+  aiQueueManager.startWorker();
+});
+
+process.on("SIGINT", () => {
+  aiQueueManager.stopWorker();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  aiQueueManager.stopWorker();
+  process.exit(0);
 });
 
