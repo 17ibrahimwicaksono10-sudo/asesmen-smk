@@ -50,16 +50,22 @@ jobs:
           set -euo pipefail
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ubuntu@43.173.6.6 '
             set -e
+            # Preflight check: Pastikan sudo -n diizinkan pada host VPS
+            sudo -n true || { echo "CRITICAL ERROR: sudo -n tidak diizinkan pada VPS! Menghentikan deployment." >&2; exit 1; }
+
             TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
             SHORT_SHA="'"${COMMIT_SHA:0:7}"'"
             mkdir -p /home/ubuntu/asesmen-backups
             mkdir -p /home/ubuntu/asesmen-code-backups
 
             # 1. Backup persistent database with strict SHA-256 integrity verification (MANDATORY)
-            if [ -f /home/ubuntu/Prototype/backend/data/database.json ]; then
+            if sudo -n test -f /home/ubuntu/Prototype/backend/data/database.json; then
               DB_BACKUP="/home/ubuntu/asesmen-backups/database-${TIMESTAMP}.json"
-              cp /home/ubuntu/Prototype/backend/data/database.json "${DB_BACKUP}"
+              sudo -n cp /home/ubuntu/Prototype/backend/data/database.json "${DB_BACKUP}"
+              sudo -n chown ubuntu:ubuntu "${DB_BACKUP}"
+              sudo -n chmod 600 "${DB_BACKUP}"
               sha256sum "${DB_BACKUP}" > "${DB_BACKUP}.sha256"
+              chmod 600 "${DB_BACKUP}.sha256"
               # Verifikasi integritas: file wajib ada, ukuran > 0, dan checksum cocok
               if [ ! -s "${DB_BACKUP}" ] || ! sha256sum -c "${DB_BACKUP}.sha256"; then
                 echo "CRITICAL ERROR: Backup database gagal diverifikasi atau korup! Menghentikan deployment." >&2
@@ -69,10 +75,13 @@ jobs:
             fi
 
             # 2. Backup persistent multimodal evidence storage with strict integrity verification (MANDATORY if exists)
-            if [ -d /home/ubuntu/Prototype/backend/data/evidence_storage ]; then
+            if sudo -n test -d /home/ubuntu/Prototype/backend/data/evidence_storage; then
               EVIDENCE_BACKUP="/home/ubuntu/asesmen-backups/evidence_storage-${TIMESTAMP}.tar.gz"
-              tar -czf "${EVIDENCE_BACKUP}" -C /home/ubuntu/Prototype/backend/data evidence_storage
+              sudo -n tar -czf "${EVIDENCE_BACKUP}" -C /home/ubuntu/Prototype/backend/data evidence_storage
+              sudo -n chown ubuntu:ubuntu "${EVIDENCE_BACKUP}"
+              sudo -n chmod 600 "${EVIDENCE_BACKUP}"
               sha256sum "${EVIDENCE_BACKUP}" > "${EVIDENCE_BACKUP}.sha256"
+              chmod 600 "${EVIDENCE_BACKUP}.sha256"
               # Verifikasi integritas: arsip gzip valid dan checksum cocok
               if [ ! -s "${EVIDENCE_BACKUP}" ] || ! tar -tzf "${EVIDENCE_BACKUP}" > /dev/null 2>&1 || ! sha256sum -c "${EVIDENCE_BACKUP}.sha256"; then
                 echo "CRITICAL ERROR: Backup evidence storage gagal diverifikasi atau korup! Menghentikan deployment." >&2
@@ -82,22 +91,26 @@ jobs:
             fi
 
             # 3. Backup secret token key and backend env configuration securely (chmod 600, zero credential logging)
-            if [ -f /home/ubuntu/Prototype/backend/data/.auth_secret ]; then
+            if sudo -n test -f /home/ubuntu/Prototype/backend/data/.auth_secret; then
               AUTH_SECRET_BACKUP="/home/ubuntu/asesmen-backups/.auth_secret-${TIMESTAMP}"
-              cp /home/ubuntu/Prototype/backend/data/.auth_secret "${AUTH_SECRET_BACKUP}"
-              chmod 600 "${AUTH_SECRET_BACKUP}"
+              sudo -n cp /home/ubuntu/Prototype/backend/data/.auth_secret "${AUTH_SECRET_BACKUP}"
+              sudo -n chown ubuntu:ubuntu "${AUTH_SECRET_BACKUP}"
+              sudo -n chmod 600 "${AUTH_SECRET_BACKUP}"
               sha256sum "${AUTH_SECRET_BACKUP}" > "${AUTH_SECRET_BACKUP}.sha256"
+              chmod 600 "${AUTH_SECRET_BACKUP}.sha256"
               if [ ! -s "${AUTH_SECRET_BACKUP}" ] || ! sha256sum -c "${AUTH_SECRET_BACKUP}.sha256"; then
                 echo "CRITICAL ERROR: Backup auth secret gagal! Menghentikan deployment." >&2
                 exit 1
               fi
               echo "Auth secret backup created and verified securely."
             fi
-            if [ -f /home/ubuntu/Prototype/backend/.env ]; then
+            if sudo -n test -f /home/ubuntu/Prototype/backend/.env; then
               ENV_BACKUP="/home/ubuntu/asesmen-backups/backend-env-${TIMESTAMP}"
-              cp /home/ubuntu/Prototype/backend/.env "${ENV_BACKUP}"
-              chmod 600 "${ENV_BACKUP}"
+              sudo -n cp /home/ubuntu/Prototype/backend/.env "${ENV_BACKUP}"
+              sudo -n chown ubuntu:ubuntu "${ENV_BACKUP}"
+              sudo -n chmod 600 "${ENV_BACKUP}"
               sha256sum "${ENV_BACKUP}" > "${ENV_BACKUP}.sha256"
+              chmod 600 "${ENV_BACKUP}.sha256"
               if [ ! -s "${ENV_BACKUP}" ] || ! sha256sum -c "${ENV_BACKUP}.sha256"; then
                 echo "CRITICAL ERROR: Backup backend env configuration gagal! Menghentikan deployment." >&2
                 exit 1
@@ -149,4 +162,4 @@ jobs:
         run: |
           set -euo pipefail
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ubuntu@43.173.6.6 \
-            'set -e; cd /home/ubuntu/Prototype; sudo -n docker compose config --quiet; sudo -n docker compose up -d --build; sudo -n docker compose ps; curl -fsS --retry 6 --retry-delay 3 --retry-connrefused http://127.0.0.1:8080/api/health'
+            'set -e; sudo -n true; cd /home/ubuntu/Prototype; sudo -n docker compose config --quiet; sudo -n docker compose up -d --build; sudo -n docker compose ps; curl -fsS --retry 6 --retry-delay 3 --retry-connrefused http://127.0.0.1:8080/api/health'
