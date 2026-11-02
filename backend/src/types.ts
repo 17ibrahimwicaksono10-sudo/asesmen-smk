@@ -489,6 +489,8 @@ export interface ArchivedItem {
   title: string;
   archivedAt: string;
   reason: string;
+  data?: any;
+  schoolId?: string;
 }
 
 export interface StudentReadinessProfileData {

@@ -247,8 +247,11 @@ Berikan output JSON dengan format persis:
 /**
  * 2. BUKTI FOTO / TULISAN TANGAN: GEMINI MULTIMODAL VISION
  * Mengirim gambar asli langsung ke Gemini Vision API untuk membaca tulisan tangan
- * SEKALIGUS menilai berdasarkan rubrik.
- * DEEPSEEK DILARANG DIPANGGIL DI SINI.
+/**
+ * 2. JAWABAN GAMBAR / TULISAN TANGAN: KOMBINASI 2-STEP
+ * Tahap 1: Gemini OCR (HANYA membaca/mengekstrak tulisan tangan, dilarang memberi nilai).
+ * Tahap 2: Jika ekstraksi sukses, kirim teks hasil OCR ke DeepSeek API untuk dinilai dengan rubrik.
+ * GEMINI DILARANG MEMBERIKAN NILAI AKHIR.
  */
 export async function evaluateImageWithGeminiVision(
   context: QuestionEvaluationContext,
@@ -262,7 +265,7 @@ export async function evaluateImageWithGeminiVision(
     question_id: context.questionId,
     attempt_id: context.attemptId,
     input_type: 'image_upload',
-    model_used: 'Gemini Vision (Multimodal)',
+    model_used: 'Gemini OCR + DeepSeek',
     transcription_or_extraction: '',
     rubric_scores: (context.rubricComponents && context.rubricComponents.length > 0)
       ? context.rubricComponents.map(r => ({
@@ -279,7 +282,7 @@ export async function evaluateImageWithGeminiVision(
     assessment_status: 'completed',
     requires_teacher_review: false,
     evaluated_at: now,
-    prompt_version: 'v3.0-gemini-vision-direct'
+    prompt_version: 'v3.0-image-ocr-deepseek'
   };
 
   const resolvedMedia = resolveMediaBase64(rawImageData);
@@ -296,7 +299,7 @@ export async function evaluateImageWithGeminiVision(
   if (!apiKey) {
     return {
       ...baseResult,
-      feedback: 'Foto lembar jawaban tersimpan dengan aman. Kunci Gemini API belum terpasang untuk penilaian visi otomatis.',
+      feedback: 'Foto lembar jawaban tersimpan dengan aman. Kunci Gemini API belum terpasang untuk OCR otomatis.',
       scoring_reason: 'Kunci API Gemini belum dikonfigurasi. Memerlukan peninjauan langsung foto asli oleh Guru.',
       assessment_status: 'perlu_review_guru',
       requires_teacher_review: true
@@ -308,48 +311,30 @@ export async function evaluateImageWithGeminiVision(
     ? resolvedMedia.split(';')[0].replace('data:', '')
     : mimeType;
 
-  const prompt = `
-Anda adalah Evaluator Asesmen Vokasi SMK Kimia Industri dengan kemampuan Vision Multimodal.
-Tugas Anda adalah:
-1. Membaca dan mengekstrak tulisan tangan siswa dari gambar ini (termasuk rumus kimia, angka perhitungan, dan langkah kerja).
-2. Menilai jawaban tulisan tangan tersebut secara objektif berdasarkan Kunci Jawaban Acuan dan Komponen Rubrik berikut.
-DILARANG memberikan skor melebihi skor maksimal (${context.maxScore}).
+  // TAHAP 1: GEMINI HANYA UNTUK OCR (OPTICAL CHARACTER RECOGNITION)
+  const ocrPrompt = `
+Anda adalah sistem OCR Asesmen Vokasi SMK Kimia Industri.
+Tugas Anda membaca dan mengekstrak seluruh teks, tulisan tangan, rumus kimia, angka perhitungan, dan langkah kerja dari gambar lembar jawaban siswa ini secara akurat dan lengkap.
 
-=== INFORMASI SOAL & KUNCI ===
-Pertanyaan: ${context.questionText}
-Kunci Jawaban Acuan: ${context.answerKey || 'Sesuai SOP industri kimia'}
-Pedoman Rubrik: ${context.rubricGuide || 'Penilaian ketepatan prosedur, perhitungan kimia, dan kepatuhan K3'}
-Komponen Rubrik: ${JSON.stringify(context.rubricComponents || [], null, 2)}
-Skor Maksimal: ${context.maxScore}
+DILARANG MEMBERIKAN NILAI ATAU EVALUASI SKOR.
+Hanya lakukan ekstraksi tulisan tangan dan periksa keterbacaan gambar.
 
-=== ATURAN INTEGRITAS & KETERBACAAN ===
-- Jika foto tulisan tangan buram, gelap, terpotong, atau tidak terbaca: Nyatakan secara jujur pada "transcription_or_extraction", set "assessment_status": "perlu_review_guru", dan "requires_teacher_review": true.
-- DILARANG mengarang isi jawaban fiktif jika tulisan tangan tidak terbaca.
-- Jika terbaca jelas, berikan transkripsi teks lengkap dan hitung skor per indikator rubrik.
-
-Berikan output JSON dengan skema persis:
+Berikan output JSON dengan format persis:
 {
-  "transcription_or_extraction": "Teks lengkap tulisan tangan yang terbaca...",
-  "total_score": number,
-  "scoring_reason": "Alasan penilaian detail berdasarkan tulisan yang terbaca...",
-  "feedback": "Umpan balik untuk siswa...",
-  "rubric_scores": [
-    {
-      "indicator": "Nama indikator rubrik",
-      "score": number,
-      "maxScore": number,
-      "feedback": "Keterangan capaian"
-    }
-  ],
+  "extracted_text": "Teks lengkap tulisan tangan yang terbaca...",
   "is_readable": boolean,
-  "requires_teacher_review": boolean
+  "unreadable_reason": "Alasan jika tulisan buram, gelap, terpotong, atau tidak terbaca, atau null"
 }`;
 
-  let success = false;
+  let extractedText = '';
+  let ocrSuccess = false;
+  let ocrModelUsed = '';
+  let isImageUnreadable = false;
+  let unreadableReason = '';
   let lastErr = '';
 
   for (const model of VALID_GEMINI_MODELS) {
-    if (success) break;
+    if (ocrSuccess) break;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const res = await fetch(url, {
@@ -361,13 +346,13 @@ Berikan output JSON dengan skema persis:
               role: 'user',
               parts: [
                 { inlineData: { mimeType: cleanMime, data: base64Clean } },
-                { text: prompt }
+                { text: ocrPrompt }
               ]
             }
           ],
           generationConfig: {
             responseMimeType: 'application/json',
-            temperature: 0.2
+            temperature: 0.1
           }
         })
       });
@@ -383,45 +368,39 @@ Berikan output JSON dengan skema persis:
       const responseText = json.candidates?.[0]?.content?.parts?.[0]?.text;
       if (responseText) {
         const parsed = JSON.parse(responseText);
-        const extractedText = (parsed.transcription_or_extraction || '').trim();
-        const isReadable = parsed.is_readable !== false && extractedText.length > 0;
-        const safeTotal = Math.min(context.maxScore, Math.max(0, Number(parsed.total_score) || 0));
-
-        const rubricScores: RubricScoreItem[] = Array.isArray(parsed.rubric_scores)
-          ? parsed.rubric_scores.map((r: any) => ({
-              indicator: String(r.indicator || 'Indikator'),
-              score: Math.max(0, Number(r.score) || 0),
-              maxScore: Math.max(1, Number(r.maxScore) || 1),
-              feedback: r.feedback ? String(r.feedback) : undefined
-            }))
-          : [];
-
-        const needsReview = !isReadable || Boolean(parsed.requires_teacher_review);
-
-        return {
-          ...baseResult,
-          model_used: `Gemini Vision (${model})`,
-          transcription_or_extraction: extractedText || (isReadable ? '' : '[Tulisan tangan tidak terbaca jelas oleh AI]'),
-          rubric_scores: rubricScores,
-          total_score: safeTotal,
-          feedback: parsed.feedback || (isReadable ? 'Foto tulisan tangan telah dinilai.' : 'Foto tulisan tangan memerlukan validasi guru.'),
-          scoring_reason: parsed.scoring_reason || (isReadable ? 'Penilaian visi Gemini selesai.' : 'Tulisan tangan buram atau kurang jelas.'),
-          assessment_status: needsReview ? 'perlu_review_guru' : 'completed',
-          requires_teacher_review: needsReview
-        };
+        extractedText = (parsed.extracted_text || parsed.transcription_or_extraction || '').trim();
+        isImageUnreadable = parsed.is_readable === false || (!extractedText && Boolean(parsed.unreadable_reason));
+        unreadableReason = parsed.unreadable_reason || '';
+        ocrSuccess = true;
+        ocrModelUsed = model;
       }
     } catch (modelErr: any) {
       lastErr = `${model} exception: ${modelErr.message}`;
     }
   }
 
-  // Jika semua model Gemini gagal dihubungi
+  // Jika semua model Gemini gagal atau gambar tidak terbaca
+  if (!ocrSuccess || isImageUnreadable || !extractedText) {
+    return {
+      ...baseResult,
+      model_used: ocrModelUsed ? `Gemini OCR (${ocrModelUsed})` : 'Gemini OCR',
+      transcription_or_extraction: extractedText || '[Foto tulisan tangan buram atau tidak terbaca jelas]',
+      feedback: 'Berkas foto lembar jawaban tersimpan aman di server. Tulisan tangan tidak cukup jelas untuk dibaca secara otomatis.',
+      scoring_reason: unreadableReason || `Gagal mengekstrak teks dari foto via Gemini OCR (${lastErr || 'buram/tidak terbaca'}). Memerlukan evaluasi langsung oleh Guru.`,
+      assessment_status: 'perlu_review_guru',
+      requires_teacher_review: true
+    };
+  }
+
+  // TAHAP 2: DEEPSEEK MENILAI TEKS HASIL EKSTRAKSI OCR GEMINI BERDASARKAN RUBRIK
+  const deepseekResult = await evaluateTypedEssayWithDeepSeek(context, extractedText);
+
   return {
-    ...baseResult,
-    feedback: 'Berkas foto tulisan tangan tersimpan aman di server. Layanan visi AI mengalami kendala.',
-    scoring_reason: `Gagal memproses gambar melalui Gemini Vision (${lastErr}). Foto asli tersimpan untuk diperiksa langsung oleh Guru.`,
-    assessment_status: 'perlu_review_guru',
-    requires_teacher_review: true
+    ...deepseekResult,
+    input_type: 'image_upload',
+    model_used: `Gemini OCR (${ocrModelUsed}) → DeepSeek`,
+    transcription_or_extraction: extractedText,
+    prompt_version: 'v3.0-image-ocr-deepseek'
   };
 }
 

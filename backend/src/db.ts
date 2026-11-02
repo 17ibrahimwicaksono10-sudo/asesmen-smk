@@ -55,10 +55,9 @@ export function getDatabasePaths(): { targetDir: string; targetFile: string } {
   }
 
   const candidateDirs = [
-    path.resolve(process.cwd(), "backend", "backend", "data"),
+    path.join(__dirname, "../data"),
     path.resolve(process.cwd(), "backend", "data"),
     path.resolve(process.cwd(), "data"),
-    path.join(__dirname, "../data"),
     path.join(__dirname, "../../data"),
   ];
 
@@ -78,7 +77,7 @@ export function getDatabasePaths(): { targetDir: string; targetFile: string } {
   }
 
   // Default fallback
-  const defaultDir = candidateDirs[1] || candidateDirs[0];
+  const defaultDir = candidateDirs[0];
   return { targetDir: defaultDir, targetFile: path.join(defaultDir, "database.json") };
 }
 
@@ -250,10 +249,24 @@ export function saveDb(): boolean {
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
+    // Pertahankan permission 0600 pada database.json
+    let fileMode = 0o600;
+    if (fs.existsSync(targetFile)) {
+      try {
+        fileMode = fs.statSync(targetFile).mode & 0o777;
+      } catch {
+        fileMode = 0o600;
+      }
+    }
     // Penulisan atomik (Atomic Write) melalui berkas temporer untuk mencegah korupsi data saat konkurensi
     const tempFile = path.join(targetDir, `.database.json.tmp.${process.pid}.${Date.now()}`);
-    fs.writeFileSync(tempFile, JSON.stringify(dbCache, null, 2), "utf-8");
+    fs.writeFileSync(tempFile, JSON.stringify(dbCache, null, 2), { encoding: "utf-8", mode: fileMode });
     fs.renameSync(tempFile, targetFile);
+    try {
+      fs.chmodSync(targetFile, fileMode);
+    } catch {
+      // Abaikan pada filesystem yang tidak mendukung chmod (seperti Windows default)
+    }
     return true;
   } catch (err) {
     console.error("[DB] Gagal menyimpan ke disk:", err);

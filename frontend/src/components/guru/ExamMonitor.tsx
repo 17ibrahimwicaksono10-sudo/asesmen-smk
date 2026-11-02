@@ -3,7 +3,7 @@ import { Exam, ExamSubmission, QuestionPackage, StudentAnswer, School, ClassRoom
 import { INITIAL_SCHOOLS } from '../../data/mockData';
 import { DEFAULT_EMPLOYABILITY_PACKAGE } from '../../data/nonTestInstrument';
 import { REVISED_QUESTIONS_24 } from '../../data/revisedQuestions';
-import { apiGet } from '../../services/api';
+import { apiGet, apiPost } from '../../services/api';
 import {
   BarChart3,
   Users,
@@ -220,41 +220,19 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
       }
 
       // Panggil endpoint penilaian terpadu yang memproses bukti multimodal tersimpan + esai siswa
-      const res = await fetch(`/api/ai/evaluate-submission/${targetSub.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
+      const data = await apiPost<{ success: boolean; submission?: ExamSubmission; message?: string }>(
+        `/api/ai/evaluate-submission/${targetSub.id}`
+      );
 
-      const data = await res.json();
       if (data.success && data.submission) {
         onUpdateSubmission(data.submission);
         setSelectedSubmission(data.submission);
       } else {
-        // Fallback jika submission baru atau offline
-        const fallbackRes = await fetch('/api/ai/evaluate-essay', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            questionText: 'Evaluasi Komprehensif Jawaban Siswa Vokasi Kimia',
-            answerKey: 'Sesuai stokiometri, K3, dan penanganan OOS ISO 17025',
-            rubricGuide: 'Pedoman Rubrik DUDI Vokasi',
-            studentAnswer: JSON.stringify(targetSub.answers || {})
-          })
-        });
-
-        const fbData = await fallbackRes.json();
-        if (fbData.success && fbData.evaluation) {
-          const aiNote = fbData.evaluation.constructiveFeedback || 'Pengerjaan baik, konsep K3 dikuasai.';
-          const updated: ExamSubmission = {
-            ...targetSub,
-            aiEvaluation: aiNote
-          };
-          onUpdateSubmission(updated);
-          setSelectedSubmission(updated);
-        }
+        alert(data.message || 'Layanan evaluasi AI tidak dapat memproses submission ini saat ini. Silakan tinjau lembar jawaban siswa secara langsung.');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error triggering AI evaluation:', err);
+      alert(`Gagal menghubungi server penilaian AI: ${err.message || err}`);
     } finally {
       setEvaluatingAi(false);
     }
@@ -452,7 +430,9 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                         <h4 className="text-sm font-bold text-white">{sub.studentName}</h4>
                         {(() => {
                           const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
-                          const isNeedsReview = !isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.validationStatus === 'pending_review' || sub.requiresTeacherReview);
+                          const isProcessing = sub.aiGradingStatus === 'processing';
+                          const isAIFailed = sub.aiGradingStatus === 'failed';
+                          const isNeedsReview = !isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.validationStatus === 'pending_review' || sub.requiresTeacherReview || isAIFailed);
                           if (isGuruValidated) {
                             return (
                               <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
@@ -460,9 +440,23 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               </span>
                             );
                           }
-                          if (isNeedsReview) {
+                          if (isProcessing) {
+                            return (
+                              <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-bold animate-pulse">
+                                Sedang Diproses AI
+                              </span>
+                            );
+                          }
+                          if (isAIFailed) {
                             return (
                               <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold">
+                                Gagal AI / Perlu Uji Guru
+                              </span>
+                            );
+                          }
+                          if (isNeedsReview) {
+                            return (
+                              <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
                                 Perlu Review Guru
                               </span>
                             );
@@ -498,7 +492,11 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               )}
                             </div>
                             <div className="text-[10px] text-slate-400 font-medium">
-                              Skor Sah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong>
+                              {hasPending ? (
+                                <span>Skor Sah Sementara: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong></span>
+                              ) : (
+                                <span>Skor Sah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong></span>
+                              )}
                             </div>
                           </>
                         );

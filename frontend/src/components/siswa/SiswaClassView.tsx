@@ -18,7 +18,8 @@ export const SiswaClassView: React.FC<SiswaClassViewProps> = ({
   const [joinSuccess, setJoinSuccess] = useState('');
 
   // Find joined class
-  const myClass = classes.find(c => c.name === currentUser.className || c.id === currentUser.classId) || classes[0];
+  const myClass = classes.find(c => (currentUser.classId && c.id === currentUser.classId) || (currentUser.className && c.name.toLowerCase().trim() === currentUser.className.toLowerCase().trim()));
+  const isOrphan = Boolean(currentUser.classId && !myClass) || !currentUser.schoolId;
 
   const handleJoinSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,7 +46,7 @@ export const SiswaClassView: React.FC<SiswaClassViewProps> = ({
       <div>
         <h1 className="text-2xl font-bold text-white flex items-center gap-3">
           <GraduationCap className="w-7 h-7 text-blue-400" />
-          Kelas Saya & Rombel Vokasi
+          Kelas Saya &amp; Rombel Vokasi
         </h1>
         <p className="text-sm text-slate-400 mt-1">
           Informasi rombel kelas aktif Anda dan fasilitas bergabung ke kelas baru menggunakan kode unik dari guru.
@@ -61,10 +62,17 @@ export const SiswaClassView: React.FC<SiswaClassViewProps> = ({
                 <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-bold flex items-center gap-1.5 w-fit mb-2">
                   <CheckCircle2 className="w-3.5 h-3.5" /> Kelas Aktif Saat Ini
                 </span>
-                <h2 className="text-xl font-bold text-white">{myClass?.name || currentUser.className || 'XII Kimia Analitik 1'}</h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xl font-bold text-white">{myClass?.name || currentUser.className || 'Kelas Belum Terdaftar'}</h2>
+                  {isOrphan && (
+                    <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold">
+                      ⚠️ Perlu Rekonsiliasi Admin
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-slate-400 mt-1 flex items-center gap-1.5">
                   <School className="w-3.5 h-3.5 text-slate-400" />
-                  {myClass?.schoolName || currentUser.schoolName || 'SMK Negeri 1 Kimia Industri Bandung'}
+                  {currentUser.schoolName || myClass?.schoolName || 'Sekolah Belum Terdaftar'}
                 </p>
               </div>
             </div>
@@ -74,14 +82,14 @@ export const SiswaClassView: React.FC<SiswaClassViewProps> = ({
                 <div className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5 mb-1">
                   <UserCheck className="w-3.5 h-3.5 text-blue-400" /> Guru Pengampu / Wali
                 </div>
-                <div className="text-xs font-bold text-white">{myClass?.teacherName || 'Dra. Endang Rahayu, M.Si'}</div>
+                <div className="text-xs font-bold text-white">{myClass?.teacherName || (isOrphan ? 'Menunggu Penugasan' : 'Belum Ditentukan')}</div>
               </div>
 
               <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
                 <div className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5 mb-1">
                   <ShieldCheck className="w-3.5 h-3.5 text-amber-400" /> Kode Unik Rombel
                 </div>
-                <div className="text-xs font-bold text-amber-400 font-mono">{myClass?.classCode || 'KA1-2024'}</div>
+                <div className="text-xs font-bold text-amber-400 font-mono">{myClass?.classCode || '-'}</div>
               </div>
             </div>
 
