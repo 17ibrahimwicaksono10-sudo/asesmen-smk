@@ -34,8 +34,9 @@ export const SiswaDashboard: React.FC<SiswaDashboardProps> = ({
 }) => {
   const [confirmingExam, setConfirmingExam] = useState<Exam | null>(null);
 
-  // Joined class information
-  const myClass = classes.find(c => c.name === currentUser.className || c.id === currentUser.classId) || classes[0];
+  // Joined class information: Cari berdasarkan classId atau className. JANGAN fallback ke classes[0]
+  const myClass = classes.find(c => (currentUser.classId && c.id === currentUser.classId) || (currentUser.className && c.name.toLowerCase().trim() === currentUser.className.toLowerCase().trim()));
+  const isOrphan = Boolean(currentUser.classId && !myClass) || !currentUser.schoolId;
 
   // Latest assessment results khusus milik siswa yang sedang login
   const studentSubs = submissions.filter(s =>
@@ -45,30 +46,42 @@ export const SiswaDashboard: React.FC<SiswaDashboardProps> = ({
     (currentUser.name && s.studentName && s.studentName.trim().toLowerCase() === currentUser.name.trim().toLowerCase())
   );
 
-  // Exams relevant for student's class and school (perseorangan)
+  // Exams relevant for student's class and school (perseorangan & isolasi ketat)
   const myClassExams = exams.filter(e => {
     const hasSubmitted = studentSubs.some(s => s.examId === e.id);
-    // PRINSIP PERSEORANGAN: Jika ujian sudah selesai (lewat) dan siswa ini belum pernah mengerjakan,
-    // maka otomatis tidak ada di daftar siswa ini (sudah lewat, bukan susulan)
     if (e.status === 'selesai' && !hasSubmitted) {
       return false;
     }
 
-    if (e.classId && currentUser.classId && e.classId === currentUser.classId) return true;
-    if (e.className && currentUser.className) {
-      const cleanE = e.className.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-      const cleanU = currentUser.className.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (cleanE === cleanU) return true;
+    // 1. ISOLASI SEKOLAH KETAT: Ujian harus dari sekolah yang sama dengan siswa
+    const examSchoolId = e.schoolId;
+    const examSchoolName = (e.schoolName || '').trim().toLowerCase();
+    const userSchoolId = currentUser.schoolId;
+    const userSchoolName = (currentUser.schoolName || '').trim().toLowerCase();
+
+    if (examSchoolId && userSchoolId && examSchoolId !== userSchoolId) {
+      return false;
     }
-    if (e.className?.toLowerCase() === 'semua kelas' || e.classId === 'all') {
-      return !e.schoolName || e.schoolName.trim().toLowerCase() === currentUser.schoolName?.trim().toLowerCase();
+    if (examSchoolName && userSchoolName && !examSchoolName.includes(userSchoolName) && !userSchoolName.includes(examSchoolName)) {
+      return false;
     }
-    if (!e.classId && !e.className && e.schoolName && currentUser.schoolName) {
-      return e.schoolName.trim().toLowerCase() === currentUser.schoolName.trim().toLowerCase();
-    }
-    if (e.schoolName && currentUser.schoolName && e.schoolName.trim().toLowerCase() === currentUser.schoolName.trim().toLowerCase()) {
+
+    // 2. ISOLASI KELAS KETAT: Ujian harus sesuai kelas siswa atau 'semua kelas'
+    const examClassId = e.classId;
+    const examClassName = (e.className || '').trim().toLowerCase();
+    const userClassId = currentUser.classId;
+    const userClassName = (currentUser.className || '').trim().toLowerCase();
+
+    if (examClassName === 'semua kelas' || examClassId === 'all') {
       return true;
     }
+    if (examClassId && userClassId && examClassId === userClassId) {
+      return true;
+    }
+    if (examClassName && userClassName && examClassName.replace(/[^a-z0-9]/g, '') === userClassName.replace(/[^a-z0-9]/g, '')) {
+      return true;
+    }
+
     return false;
   });
 
@@ -144,8 +157,15 @@ export const SiswaDashboard: React.FC<SiswaDashboardProps> = ({
           <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
             Halo, {currentUser.name} 👋
           </h1>
-          <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-            Rombel: <strong className="text-white font-bold">{myClass?.name || 'XII Kimia Analitik 1'}</strong> • NIS: <strong className="text-white font-bold">{currentUser.identityNo}</strong> • Sekolah: <strong className="text-white font-bold">{currentUser.schoolName || 'SMK Negeri 1 Kimia Industri Bandung'}</strong>
+          <p className="text-xs sm:text-sm text-slate-300 leading-relaxed flex flex-wrap items-center gap-1.5">
+            <span>Rombel: <strong className="text-white font-bold">{myClass?.name || currentUser.className || 'Kelas Belum Terdaftar'}</strong></span>
+            <span>• NIS: <strong className="text-white font-bold">{currentUser.identityNo || '-'}</strong></span>
+            <span>• Sekolah: <strong className="text-white font-bold">{currentUser.schoolName || myClass?.schoolName || 'Sekolah Belum Terdaftar'}</strong></span>
+            {isOrphan && (
+              <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold inline-flex items-center gap-1">
+                ⚠️ Perlu Rekonsiliasi Admin
+              </span>
+            )}
           </p>
         </div>
 

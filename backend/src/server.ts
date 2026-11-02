@@ -6,7 +6,7 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import { initDb, getDb, saveDb, resetDb, getEvidenceStorageDir } from "./db";
+import { initDb, getDb, saveDb, resetDb, getEvidenceStorageDir, DatabaseSchema } from "./db";
 import {
   requireAuth,
   optionalAuth,
@@ -18,6 +18,7 @@ import {
   hashPassword,
   verifyPassword,
   AuthenticatedRequest,
+  AuthPayload,
 } from "./auth";
 import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
@@ -349,10 +350,25 @@ async function callModalityAI(
   }
 }
 
+export function getStaticFrontendDir(): string | undefined {
+  const candidateDistDirs = [
+    path.resolve(process.cwd(), "frontend", "dist"),
+    path.resolve(process.cwd(), "..", "frontend", "dist"),
+    path.resolve(process.cwd(), "dist", "frontend"),
+    path.resolve(__dirname, "../../frontend/dist"),
+    path.resolve(__dirname, "../frontend/dist"),
+  ];
+  return candidateDistDirs.find((d) => fs.existsSync(path.join(d, "index.html")));
+}
+
 // -------------------------------------------------------------
 // Root & Health Check Endpoints
 // -------------------------------------------------------------
 app.get("/", (_req: Request, res: Response) => {
+  const staticDir = getStaticFrontendDir();
+  if (staticDir) {
+    return res.sendFile(path.join(staticDir, "index.html"));
+  }
   res.json({
     status: "ok",
     message: "Backend API Sistem Asesmen & Profil Kesiapan Kerja aktif.",
@@ -658,6 +674,72 @@ export function verifySubmissionTeacherAccess(
   return { authorized: false };
 }
 
+// Helper: Filter daftar ujian berdasarkan hak akses peran & multi-tenant sekolah/kelas
+export function filterExamsForUser(exams: Exam[], user: AuthPayload | undefined, db: DatabaseSchema): Exam[] {
+  if (!user || user.role === 'admin') {
+    return exams;
+  }
+
+  if (user.role === 'guru') {
+    const teacherUser = (db.users || []).find(u => u.id === user.userId || (u.email && user.email && u.email.toLowerCase() === user.email.toLowerCase()));
+    const teacherSchoolId = user.schoolId || teacherUser?.schoolId;
+    const teacherSchoolName = user.schoolName || teacherUser?.schoolName;
+    return exams.filter(e => {
+      if (e.teacherId && (e.teacherId === user.userId || e.teacherId === user.id)) return true;
+      if (teacherSchoolId && e.schoolId && e.schoolId === teacherSchoolId) return true;
+      if (teacherSchoolName && e.schoolName && isSchoolMatchStrict(e.schoolName, teacherSchoolName)) return true;
+      if (!e.schoolId && !e.schoolName) return true;
+      return false;
+    });
+  }
+
+  if (user.role === 'siswa') {
+    const dbUser = (db.users || []).find(u => u.id === (user.userId || user.id));
+    const studentSchoolId = dbUser?.schoolId || user.schoolId;
+    const studentSchoolName = dbUser?.schoolName || user.schoolName;
+    const studentClassId = dbUser?.classId || user.classId;
+    const studentClassName = dbUser?.className || user.className;
+
+    return exams.filter(e => {
+      const hasSchoolConstraint = Boolean(e.schoolId || e.schoolName);
+      const hasClassConstraint = Boolean(e.classId || e.className);
+
+      if (!hasSchoolConstraint && !hasClassConstraint) {
+        return true;
+      }
+
+      if (hasSchoolConstraint) {
+        if (!studentSchoolId && !studentSchoolName) return false;
+        let schoolMatches = false;
+        if (e.schoolId && studentSchoolId && e.schoolId === studentSchoolId) {
+          schoolMatches = true;
+        } else if (e.schoolName && studentSchoolName && isSchoolMatchStrict(e.schoolName, studentSchoolName)) {
+          schoolMatches = true;
+        }
+        if (!schoolMatches) return false;
+      }
+
+      if (hasClassConstraint) {
+        const cId = (e.classId || '').trim();
+        const cName = (e.className || '').trim().toLowerCase();
+        if (cId === 'ALL' || cName === 'semua kelas' || cName === 'all') {
+          return true;
+        }
+        if (!studentClassId && !studentClassName) return false;
+        if (cId && studentClassId && cId === studentClassId) return true;
+        if (cName && studentClassName && (cName === studentClassName.toLowerCase() || cName.includes(studentClassName.toLowerCase()) || studentClassName.toLowerCase().includes(cName))) {
+          return true;
+        }
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  return exams;
+}
+
 // -------------------------------------------------------------
 // Endpoint Ringkasan Dashboard (Ringan & Cepat < 2 KB)
 // -------------------------------------------------------------
@@ -763,8 +845,16 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
     return safe;
   });
 
-  // Sanitasi data: Pengguna hanya dikirim jika login, dan tanpa password
-  const safeUsers = req.user ? (db.users || []).map(sanitizeUser) : [];
+  const safeUsers = req.user ? (db.users || []).map(u => {
+    const cleanU = sanitizeUser(u);
+    if (u.role === 'siswa') {
+      const classExists = u.classId ? (db.classes || []).some(c => c.id === u.classId) : false;
+      const schoolExists = u.schoolId ? (db.schools || []).some(s => s.id === u.schoolId) : false;
+      (cleanU as any).isOrphanClass = Boolean(u.classId && !classExists);
+      (cleanU as any).needsReconciliation = Boolean((u.classId && !classExists) || !u.schoolId || !schoolExists);
+    }
+    return cleanU;
+  }) : [];
 
   // Sanitasi konfigurasi sistem: Hilangkan API keys Gemini & DeepSeek
   const safeSettings = sanitizeSettings(db.settings);
@@ -777,9 +867,9 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
     questions: isTeacherOrAdmin ? p.questions : sanitizeQuestionsForStudent(p.questions || [])
   }));
 
-  // Sanitasi daftar ujian (ringkas): questionSnapshot tidak dikirim di bootstrap agar hemat bandwidth (< 50 KB).
-  // Soal ujian diambil sesuai hak akses melalui GET /api/exams/:id/questions saat ujian dimulai.
-  const safeExams = (db.exams || []).map(e => ({
+  // Sanitasi & isolasi daftar ujian: Filter sesuai hak akses & relasi multi-tenant sekolah/kelas
+  const visibleExams = filterExamsForUser(db.exams || [], req.user, db);
+  const safeExams = visibleExams.map(e => ({
     ...e,
     questionSnapshot: undefined
   }));
@@ -849,6 +939,24 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
     const effectiveClassName = resolvedClassName;
     const effectiveExamTitle = resolvedExamTitle || (s.examId ? `Ujian Historis (${s.examId})` : 'Ujian Tanpa Judul');
 
+    // Sanitasi jawaban siswa jika dikirimkan: Hapus fileData Base64 agar tidak membengkak
+    let safeStudentAnswers: any = undefined;
+    if (req.user?.role === 'siswa' && s.studentId === req.user?.userId && s.answers) {
+      safeStudentAnswers = {};
+      for (const [qId, qAns] of Object.entries(s.answers)) {
+        const cleanEvidences = Array.isArray((qAns as any)?.multimodalEvidences)
+          ? (qAns as any).multimodalEvidences.map((ev: any) => {
+              const { fileData, ...cleanEv } = ev;
+              return cleanEv;
+            })
+          : undefined;
+        safeStudentAnswers[qId] = {
+          ...(qAns as any),
+          multimodalEvidences: cleanEvidences,
+        };
+      }
+    }
+
     return {
       id: s.id,
       examId: s.examId,
@@ -862,7 +970,8 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       classId: effectiveClassId,
       className: effectiveClassName,
       submitTime: s.submitTime,
-      totalScore: s.totalScore,
+      score: typeof s.score === 'number' ? s.score : s.totalScore,
+      totalScore: typeof s.totalScore === 'number' ? s.totalScore : s.score,
       technicalScore: s.technicalScore,
       employabilityScore: s.employabilityScore,
       rawScoreTotal: s.rawScoreTotal,
@@ -870,6 +979,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       originalAIScoreTotal: s.originalAIScoreTotal,
       teacherScoreTotal: s.teacherScoreTotal,
       status: s.status,
+      isTeacherValidated: Boolean(s.isTeacherValidated || s.validationStatus === 'approved'),
       validationStatus: s.validationStatus,
       validatedBy: s.validatedBy,
       validatedAt: s.validatedAt,
@@ -883,8 +993,8 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       evidences: safeEvidences,
       evidenceCount: safeEvidences.length,
       needsReconciliation: req.user?.role === 'admin' ? (!effectiveSchoolId && !effectiveSchoolName) : undefined,
-      // Jawaban rincian: Siswa hanya menerima miliknya sendiri. Guru/Admin mengambil detail per-submission on-demand via GET /api/submissions/:id
-      answers: req.user?.role === 'siswa' && s.studentId === req.user?.userId ? s.answers : undefined,
+      // Jawaban rincian: Siswa hanya menerima miliknya sendiri tanpa Base64. Guru/Admin mengambil detail per-submission on-demand via GET /api/submissions/:id
+      answers: safeStudentAnswers,
     };
   });
 
@@ -899,6 +1009,31 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
     reason: a.reason,
   }));
 
+  // Sanitasi portofolio di bootstrap: Siswa hanya menerima portofolionya sendiri. Guru menerima siswa sekolahnya. Anonim menerima []
+  let rawPortfolios = db.portfolios || [];
+  if (!req.user) {
+    rawPortfolios = [];
+  } else if (req.user.role === 'siswa') {
+    const sId = req.user.userId || req.user.id;
+    const sNis = req.user.identityNo;
+    rawPortfolios = rawPortfolios.filter(p => p.studentId === sId || (sNis && p.studentId === sNis));
+  } else if (req.user.role === 'guru') {
+    const teacherUser = (db.users || []).find(u => u.id === req.user?.userId || (u.email && req.user?.email && u.email.toLowerCase() === req.user.email.toLowerCase()));
+    const tSchoolId = req.user.schoolId || teacherUser?.schoolId;
+    const tSchoolName = req.user.schoolName || teacherUser?.schoolName;
+    rawPortfolios = rawPortfolios.filter(p => {
+      const studentUser = (db.users || []).find(u => u.id === p.studentId || (p.studentId && u.identityNo === p.studentId));
+      if (!studentUser) return false;
+      if (tSchoolId && studentUser.schoolId) return studentUser.schoolId === tSchoolId;
+      if (tSchoolName && studentUser.schoolName) return isSchoolMatchStrict(studentUser.schoolName, tSchoolName);
+      return false;
+    });
+  }
+  const safePortfolios = rawPortfolios.map((p: any) => {
+    const { fileData, ...cleanP } = p;
+    return cleanP;
+  });
+
   res.json({
     success: true,
     data: {
@@ -911,7 +1046,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       submissions: safeSubmissions,
       archives: safeArchives,
       settings: safeSettings,
-      portfolios: db.portfolios || [],
+      portfolios: safePortfolios,
       lastUpdated: db.lastUpdated,
     },
   });
@@ -947,7 +1082,7 @@ app.post("/api/admin/reset-database", requireAuth, requireRole("admin"), (_req: 
 // -------------------------------------------------------------
 app.post("/api/auth/register", (req: Request, res: Response) => {
   try {
-    const { name, email, password, identityNo, role, schoolName, className, classId } = req.body;
+    const { name, email, password, identityNo, role, schoolId, schoolName, className, classId } = req.body;
 
     if (!name || !email) {
       return res.status(400).json({ success: false, error: "Nama dan email wajib diisi." });
@@ -963,6 +1098,8 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
       }
       if (className && !existing.className) existing.className = className.trim();
       if (classId && !existing.classId) existing.classId = classId.trim();
+      if (schoolId && !existing.schoolId) existing.schoolId = schoolId.trim();
+      if (schoolName && !existing.schoolName) existing.schoolName = schoolName.trim();
       saveDb();
       const token = generateAuthToken(existing);
       return res.json({ success: true, user: sanitizeUser(existing), token, message: "User sudah terdaftar." });
@@ -975,6 +1112,7 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
       password: hashPassword(userPassword),
       role: role || "siswa",
       identityNo: identityNo?.trim() || `NIS-${Date.now().toString().slice(-5)}`,
+      schoolId: schoolId?.trim(),
       schoolName: schoolName?.trim() || "SMK Mitra Industri",
       className: className?.trim(),
       classId: classId?.trim(),
@@ -999,11 +1137,11 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
 
   const cleanEmail = email.trim().toLowerCase();
   const db = getDb();
-  let user = db.users.find((u) => u.email.toLowerCase() === cleanEmail);
+  let user = (db.users || []).find((u) => u.email.toLowerCase() === cleanEmail);
 
   // If not found in db.users, check db.teachers and auto-register
   if (!user) {
-    const teacher = db.teachers.find((t) => t.email.toLowerCase() === cleanEmail);
+    const teacher = (db.teachers || []).find((t) => t.email.toLowerCase() === cleanEmail);
     if (teacher) {
       user = {
         id: teacher.id,
@@ -1203,8 +1341,13 @@ app.put("/api/auth/users/:id", requireAuth, (req: AuthenticatedRequest, res: Res
 });
 
 // -------------------------------------------------------------
-// CRUD - Schools (HANYA ADMIN)
+// CRUD - Schools
 // -------------------------------------------------------------
+app.get("/api/schools", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  res.json({ success: true, schools: db.schools || [] });
+});
+
 app.post("/api/schools", requireAuth, requireRole("admin"), (_req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newSchool: School = _req.body;
@@ -1231,8 +1374,13 @@ app.delete("/api/schools/:id", requireAuth, requireRole("admin"), (req: Authenti
 });
 
 // -------------------------------------------------------------
-// CRUD - Classes (ADMIN & GURU)
+// CRUD - Classes
 // -------------------------------------------------------------
+app.get("/api/classes", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  res.json({ success: true, classes: db.classes || [] });
+});
+
 app.post("/api/classes", requireAuth, requireRole("admin", "guru"), (_req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newClass: ClassRoom = _req.body;
@@ -1259,8 +1407,17 @@ app.delete("/api/classes/:id", requireAuth, requireRole("admin", "guru"), (req: 
 });
 
 // -------------------------------------------------------------
-// CRUD - Teachers (HANYA ADMIN)
+// CRUD - Teachers
 // -------------------------------------------------------------
+app.get("/api/teachers", requireAuth, requireRole("admin", "guru"), (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const safeTeachers = (db.teachers || []).map(t => {
+    const { password, ...safe } = t;
+    return safe;
+  });
+  res.json({ success: true, teachers: safeTeachers });
+});
+
 app.post("/api/teachers", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newTeacher: Teacher = req.body;
@@ -1438,9 +1595,10 @@ app.delete("/api/packages/:id", requireAuth, requireRole("admin", "guru"), (req:
 // -------------------------------------------------------------
 // CRUD - Exams (ADMIN & GURU) & Question Resolver
 // -------------------------------------------------------------
-app.get("/api/exams", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get("/api/exams", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
-  res.json({ success: true, data: db.exams || [], exams: db.exams || [] });
+  const visibleExams = filterExamsForUser(db.exams || [], req.user, db);
+  res.json({ success: true, data: visibleExams, exams: visibleExams });
 });
 
 // Helper: Sanitasi butir soal agar TIDAK membocorkan kunci jawaban dan rubrik rahasia ke browser siswa
@@ -2069,14 +2227,14 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     submission.employabilityScore = 0;
   }
 
-  const hasSubjective = canonicalQuestions.some(q => q.type === 'essay' || q.type === 'analisis_kasus');
+  const hasSubjective = canonicalQuestions.some(q => ['essay', 'analisis_kasus', 'scenario_assessment', 'short_answer', 'essay_subquestions'].includes(q.type));
   const hasMultimodalEvidence = Boolean(
     (submission.evidences && submission.evidences.length > 0) ||
     Object.values(submission.answers || {}).some((a: any) => a.multimodalEvidences && a.multimodalEvidences.length > 0)
   );
   // Periksa apakah masih ada komponen esai/subjektif yang belum dinilai (pending / undefined)
   const hasPendingComponents = canonicalQuestions.some(q => {
-    const isSubjective = ['essay', 'analisis_kasus', 'scenario_assessment'].includes(q.type);
+    const isSubjective = ['essay', 'analisis_kasus', 'scenario_assessment', 'short_answer', 'essay_subquestions'].includes(q.type);
     const ans = enrichedAnswers[q.id];
     return isSubjective && typeof ans?.score !== 'number';
   });
@@ -2130,19 +2288,25 @@ app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Resp
 
   // 2. Otorisasi Akses Siswa: Periksa apakah siswa berhak mengumpulkan ujian ini
   if (req.user && req.user.role === 'siswa') {
-    submission.studentId = req.user.userId;
-    submission.studentName = req.user.name;
-    submission.studentEmail = req.user.email;
-    if (req.user.identityNo) submission.studentNis = req.user.identityNo;
-    if (req.user.schoolId) submission.schoolId = req.user.schoolId;
-    if (req.user.schoolName) submission.schoolName = req.user.schoolName;
-    if (req.user.classId) submission.classId = req.user.classId;
-    if (req.user.className) submission.className = req.user.className;
+    const dbUser = (db.users || []).find(u => u.id === (req.user?.userId || req.user?.id));
+    const activeClassId = dbUser?.classId || req.user.classId;
+    const activeClassName = dbUser?.className || req.user.className;
+    const activeSchoolId = dbUser?.schoolId || req.user.schoolId;
+    const activeSchoolName = dbUser?.schoolName || req.user.schoolName;
 
-    const studentClassId = req.user.classId?.trim();
-    const studentClassName = req.user.className?.toLowerCase()?.trim();
-    const studentSchoolId = req.user.schoolId?.trim();
-    const studentSchoolName = req.user.schoolName?.toLowerCase()?.trim();
+    submission.studentId = req.user.userId || req.user.id;
+    submission.studentName = dbUser?.name || req.user.name;
+    submission.studentEmail = dbUser?.email || req.user.email;
+    submission.studentNis = dbUser?.identityNo || req.user.identityNo;
+    submission.schoolId = activeSchoolId;
+    submission.schoolName = activeSchoolName;
+    submission.classId = activeClassId;
+    submission.className = activeClassName;
+
+    const studentClassId = activeClassId?.trim();
+    const studentClassName = activeClassName?.toLowerCase()?.trim();
+    const studentSchoolId = activeSchoolId?.trim();
+    const studentSchoolName = activeSchoolName?.toLowerCase()?.trim();
     const examClassId = exam.classId?.trim();
     const examClassName = exam.className?.toLowerCase()?.trim();
     const examSchoolId = exam.schoolId?.trim();
@@ -2215,6 +2379,10 @@ app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Resp
 
   // Amankan berkas multimodal ke disk fisik (hapus Base64)
   extractEvidenceBase64FromSubmission(submission);
+
+  if (!Array.isArray(db.submissions)) {
+    db.submissions = [];
+  }
 
   // Kunci Idempoten: Cek apakah submission untuk (examId, studentId) atau (examId, studentNis) sudah ada
   const existingIdx = db.submissions.findIndex(s =>
@@ -2325,13 +2493,49 @@ app.put("/api/submissions/:id", requireAuth, requireRole("admin", "guru"), (req:
 });
 
 // -------------------------------------------------------------
-// Settings & Reset (HANYA ADMIN)
+// Settings (ADMIN & READ-ONLY GURU)
 // -------------------------------------------------------------
+app.get("/api/settings", optionalAuth, (_req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  res.json({ success: true, settings: sanitizeSettings(db.settings) });
+});
+
 app.put("/api/settings", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newSettings: SystemSettings = req.body;
+
+  // Proteksi Kunci Rahasia: JANGAN biarkan nilai apiKey yang dimasking menimpa kunci sebenarnya di database!
+  const existingProviders = db.settings.providers || [];
+  if (Array.isArray(newSettings.providers)) {
+    newSettings.providers = newSettings.providers.map(p => {
+      const existing = existingProviders.find(ep => ep.id === p.id || ep.name === p.name);
+      // Jika apiKey kosong, '********', atau mengandung '***', pertahankan kunci asli yang tersimpan
+      if (!p.apiKey || p.apiKey.includes('***') || p.apiKey === '********') {
+        return {
+          ...p,
+          apiKey: existing?.apiKey || p.apiKey || '',
+        };
+      }
+      return p;
+    });
+  }
+
+  // Lindungi kunci legacy jika dimasking
+  if (!newSettings.deepseekApiKey || newSettings.deepseekApiKey.includes('***') || newSettings.deepseekApiKey === '********') {
+    newSettings.deepseekApiKey = db.settings.deepseekApiKey;
+  }
+  if (!newSettings.geminiApiKey || newSettings.geminiApiKey.includes('***') || newSettings.geminiApiKey === '********') {
+    newSettings.geminiApiKey = db.settings.geminiApiKey;
+  }
+  if (!newSettings.geminiModel && db.settings.geminiModel) {
+    newSettings.geminiModel = db.settings.geminiModel;
+  }
+
   db.settings = { ...db.settings, ...newSettings };
-  saveDb();
+  const ok = saveDb();
+  if (!ok) {
+    return res.status(500).json({ success: false, error: "Gagal menyimpan konfigurasi ke database disk." });
+  }
   res.json({ success: true, settings: sanitizeSettings(db.settings) });
 });
 
@@ -3344,7 +3548,9 @@ Berikan JSON:
     : `Ekstrak dan kelompokkan isi dokumen kerja ini ke dalam teks ringkas yang terstruktur.`;
 
   let aiWorked = false;
-  const apiKey = process.env.GEMINI_API_KEY;
+  const dbSettings = (getDb().settings as any) || {};
+  const apiKey = dbSettings.geminiApiKey || process.env.GEMINI_API_KEY;
+  const geminiBaseUrl = (dbSettings.geminiBaseUrl || process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
   if (rawFileData && apiKey) {
     const base64Clean = rawFileData.replace(/^data:[^;]+;base64,/, "");
     const mimeType = rawFileData.split(";")[0]?.replace("data:", "") || (isAudio ? "audio/webm" : "image/jpeg");
@@ -3354,7 +3560,7 @@ Berikan JSON:
       if (aiWorked) break;
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const url = `${geminiBaseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
           const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

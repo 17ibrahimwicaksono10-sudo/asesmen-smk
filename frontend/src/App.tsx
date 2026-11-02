@@ -191,11 +191,7 @@ export default function App() {
       return updated;
     });
     try {
-      await fetch('/api/portfolios', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(item)
-      });
+      await apiPost('/api/portfolios', item);
     } catch (e) { console.error(e); }
   };
 
@@ -208,7 +204,7 @@ export default function App() {
       return updated;
     });
     try {
-      await fetch(`/api/portfolios/${id}`, { method: 'DELETE' });
+      await apiDelete(`/api/portfolios/${id}`);
     } catch (e) { console.error(e); }
   };
 
@@ -221,11 +217,7 @@ export default function App() {
       return updated;
     });
     try {
-      await fetch(`/api/portfolios/${item.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(item)
-      });
+      await apiPut(`/api/portfolios/${item.id}`, item);
     } catch (e) { console.error(e); }
   };
 
@@ -497,56 +489,40 @@ export default function App() {
   const handleAddSchool = async (newSchool: School) => {
     setSchools(prev => [...prev, newSchool]);
     try {
-      await fetch('/api/schools', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSchool)
-      });
-    } catch (e) { console.error(e); }
+      await apiPost('/api/schools', newSchool);
+    } catch (e) { console.error('[Frontend] Gagal menambah sekolah:', e); }
   };
   const handleUpdateSchool = async (updatedSchool: School) => {
     setSchools(prev => prev.map(s => s.id === updatedSchool.id ? updatedSchool : s));
     try {
-      await fetch(`/api/schools/${updatedSchool.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedSchool)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut(`/api/schools/${updatedSchool.id}`, updatedSchool);
+    } catch (e) { console.error('[Frontend] Gagal memperbarui sekolah:', e); }
   };
   const handleDeleteSchool = async (schoolId: string) => {
     setSchools(prev => prev.filter(s => s.id !== schoolId));
     try {
-      await fetch(`/api/schools/${schoolId}`, { method: 'DELETE' });
-    } catch (e) { console.error(e); }
+      await apiDelete(`/api/schools/${schoolId}`);
+    } catch (e) { console.error('[Frontend] Gagal menghapus sekolah:', e); }
   };
 
   // CRUD - Classes
   const handleAddClass = async (newClass: ClassRoom) => {
     setClasses(prev => [...prev, newClass]);
     try {
-      await fetch('/api/classes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newClass)
-      });
-    } catch (e) { console.error(e); }
+      await apiPost('/api/classes', newClass);
+    } catch (e) { console.error('[Frontend] Gagal menambah kelas:', e); }
   };
   const handleUpdateClass = async (updatedClass: ClassRoom) => {
     setClasses(prev => prev.map(c => c.id === updatedClass.id ? updatedClass : c));
     try {
-      await fetch(`/api/classes/${updatedClass.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedClass)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut(`/api/classes/${updatedClass.id}`, updatedClass);
+    } catch (e) { console.error('[Frontend] Gagal memperbarui kelas:', e); }
   };
   const handleDeleteClass = async (classId: string) => {
     setClasses(prev => prev.filter(c => c.id !== classId));
     try {
-      await fetch(`/api/classes/${classId}`, { method: 'DELETE' });
-    } catch (e) { console.error(e); }
+      await apiDelete(`/api/classes/${classId}`);
+    } catch (e) { console.error('[Frontend] Gagal menghapus kelas:', e); }
   };
 
   // CRUD - Teachers
@@ -581,12 +557,8 @@ export default function App() {
     });
 
     try {
-      await fetch('/api/teachers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newTeacher)
-      });
-    } catch (e) { console.error(e); }
+      await apiPost('/api/teachers', newTeacher);
+    } catch (e) { console.error('[Frontend] Gagal menambah guru:', e); }
   };
 
   const handleUpdateTeacher = async (updatedTeacher: Teacher) => {
@@ -637,12 +609,8 @@ export default function App() {
     });
 
     try {
-      await fetch(`/api/teachers/${updatedTeacher.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedTeacher)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut(`/api/teachers/${updatedTeacher.id}`, updatedTeacher);
+    } catch (e) { console.error('[Frontend] Gagal memperbarui guru:', e); }
   };
 
   const handleDeleteTeacher = async (teacherId: string) => {
@@ -664,8 +632,8 @@ export default function App() {
     });
 
     try {
-      await fetch(`/api/teachers/${teacherId}`, { method: 'DELETE' });
-    } catch (e) { console.error(e); }
+      await apiDelete(`/api/teachers/${teacherId}`);
+    } catch (e) { console.error('[Frontend] Gagal menghapus guru:', e); }
   };
 
   // CRUD - Packages
@@ -798,12 +766,8 @@ export default function App() {
       return [updatedSubmission, ...prev];
     });
     try {
-      await fetch(`/api/submissions/${updatedSubmission.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedSubmission)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut(`/api/submissions/${updatedSubmission.id}`, updatedSubmission);
+    } catch (e) { console.error('[Frontend] Gagal memperbarui submission:', e); }
   };
 
   // Student Actions
@@ -833,11 +797,7 @@ export default function App() {
         }
         return prev;
       });
-      fetch(`/api/auth/users/${currentUser.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedUser)
-      }).catch(console.error);
+      apiPut(`/api/auth/users/${currentUser.id}`, updatedUser).catch(console.error);
       return true;
     }
     return false;
@@ -952,12 +912,11 @@ export default function App() {
   const handleUpdateSettings = async (newSettings: SystemSettings) => {
     setSettings(newSettings);
     try {
-      await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSettings)
-      });
-    } catch (e) { console.error(e); }
+      await apiPut('/api/settings', newSettings);
+      console.log('[Frontend] Pengaturan sistem berhasil disimpan permanen ke server database.');
+    } catch (e) {
+      console.error('[Frontend] Gagal menyimpan pengaturan:', e);
+    }
   };
 
   // Archives handlers
@@ -971,12 +930,7 @@ export default function App() {
   // Reset Password Siswa oleh Admin/Guru
   const handleResetStudentPassword = async (studentId: string, newPassword: string): Promise<boolean> => {
     try {
-      const res = await fetch('/api/auth/reset-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: studentId, newPassword }),
-      });
-      const data = await res.json();
+      const data = await apiPost('/api/auth/reset-password', { userId: studentId, newPassword });
       if (data.success) {
         setRegisteredUsers(prev => {
           const updated = prev.map(u => u.id === studentId ? { ...u, password: newPassword } : u);
@@ -990,6 +944,27 @@ export default function App() {
       return false;
     } catch (err) {
       console.error('Error resetting password:', err);
+      return false;
+    }
+  };
+
+  // Update Student (Rekonsiliasi Rombel / Sekolah)
+  const handleUpdateStudent = async (updatedStudent: User): Promise<boolean> => {
+    try {
+      const res = await apiPut<{ success: boolean; user?: User }>(`/api/auth/users/${updatedStudent.id}`, updatedStudent);
+      if (res && res.success) {
+        setRegisteredUsers(prev => {
+          const updated = prev.map(u => u.id === updatedStudent.id ? { ...u, ...updatedStudent } : u);
+          try {
+            localStorage.setItem('voc_registered_users', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Error updating student reconciliation:', err);
       return false;
     }
   };
@@ -1065,7 +1040,7 @@ export default function App() {
         schoolId={currentUser.schoolId || runningExam.exam.schoolId}
         schoolName={currentUser.schoolName || runningExam.exam.schoolName}
         classId={currentUser.classId || runningExam.exam.classId}
-        className={currentUser.className || 'XII Kimia Analitik 1'}
+        className={currentUser.className || runningExam.exam.className || 'Umum'}
         onSubmitExam={handleSubmitExamRunner}
         onCancelExam={() => {
           try {
@@ -1167,6 +1142,7 @@ export default function App() {
                   schools={schools}
                   classes={classes}
                   onResetPassword={handleResetStudentPassword}
+                  onUpdateStudent={handleUpdateStudent}
                 />
               )}
 

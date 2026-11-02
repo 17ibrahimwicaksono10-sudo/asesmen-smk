@@ -314,10 +314,12 @@ class AIEvaluationQueueManager {
 
         // Deteksi kegagalan layanan AI atau ketiadaan API key
         const isFailedOrOffline = evalResult.assessment_status === 'failed' ||
-          evalResult.assessment_status === 'perlu_review_guru' ||
+          evalResult.total_score === undefined ||
           evalResult.scoring_reason?.includes('belum dikonfigurasi') ||
           evalResult.scoring_reason?.includes('Pengecualian') ||
-          evalResult.requires_teacher_review;
+          evalResult.scoring_reason?.includes('HTTP 500') ||
+          evalResult.scoring_reason?.includes('HTTP 401') ||
+          evalResult.scoring_reason?.includes('HTTP 403');
 
         if (isFailedOrOffline) {
           anyServiceFailed = true;
@@ -384,7 +386,7 @@ class AIEvaluationQueueManager {
         currentSub.aiEvaluation = JSON.stringify(essayEvaluations);
         currentSub.aiGradedAt = new Date().toISOString();
         currentSub.aiGradingLockedAt = undefined;
-        currentSub.aiGradingStatus = 'completed';
+        currentSub.aiGradingStatus = anyServiceFailed ? 'failed' : 'completed';
         saveDb();
         return currentSub;
       }
@@ -405,7 +407,7 @@ class AIEvaluationQueueManager {
         sub.aiGradingError = lastErrorMessage;
         const currentAttempts = sub.aiGradingAttempts || 1;
 
-        if (currentAttempts < this.MAX_RETRIES) {
+        if (currentAttempts < this.MAX_RETRIES && !forceRetry) {
           // Jadwalkan retry eksponensial (10 detik, 25 detik)
           const delayMs = Math.min(60000, 10000 * Math.pow(2.5, currentAttempts - 1));
           sub.aiGradingNextRetryAt = new Date(Date.now() + delayMs).toISOString();
@@ -416,15 +418,15 @@ class AIEvaluationQueueManager {
             this.enqueue(submissionId, true);
           }, delayMs);
         } else {
-          // Batas maksimum retry tercapai
+          // Batas maksimum retry tercapai atau evaluasi paksa gagal
           sub.aiGradingStatus = 'failed';
           sub.requiresTeacherReview = true;
           sub.hasPendingComponents = true;
           sub.isScoreFinal = false;
           sub.status = 'perlu_pemeriksaan';
           sub.validationStatus = 'pending_review';
-          sub.teacherFollowUp = 'Penilaian otomatis AI mencapai batas percobaan (layanan API belum terpasang atau kuota limit). Jawaban siswa tersimpan utuh tanpa nilai buatan dan menunggu penilaian langsung oleh Guru Penguji.';
-          console.warn(`[AI Worker] Submission ${submissionId} gagal dinilai setelah ${this.MAX_RETRIES} percobaan. Menyerahkan ke guru.`);
+          sub.teacherFollowUp = 'Penilaian otomatis AI belum berhasil (layanan API belum terpasang atau mengalami kendala). Jawaban siswa tersimpan utuh tanpa nilai buatan dan menunggu penilaian langsung oleh Guru Penguji.';
+          console.warn(`[AI Worker] Submission ${submissionId} gagal dinilai setelah ${currentAttempts} percobaan. Menyerahkan ke guru.`);
         }
       } else {
         // Berhasil Dinilai Penuh

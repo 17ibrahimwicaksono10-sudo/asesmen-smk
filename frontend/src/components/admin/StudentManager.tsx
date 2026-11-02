@@ -31,11 +31,20 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
   students,
   schools,
   classes,
-  onResetPassword
+  onResetPassword,
+  onUpdateStudent
 }) => {
   const [selectedSchoolId, setSelectedSchoolId] = useState<string>('ALL');
   const [selectedClassId, setSelectedClassId] = useState<string>('ALL');
   const [searchTerm, setSearchTerm] = useState('');
+  const [filterReconciliationOnly, setFilterReconciliationOnly] = useState(false);
+
+  // Reconciliation Modal State
+  const [reconcilingStudent, setReconcilingStudent] = useState<User | null>(null);
+  const [targetSchoolId, setTargetSchoolId] = useState('');
+  const [targetClassId, setTargetClassId] = useState('');
+  const [isSavingReconciliation, setIsSavingReconciliation] = useState(false);
+  const [reconciliationFeedback, setReconciliationFeedback] = useState<string | null>(null);
 
   // Reset Password Modal State
   const [selectedStudent, setSelectedStudent] = useState<User | null>(null);
@@ -44,6 +53,15 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
   const [isResetting, setIsResetting] = useState(false);
   const [resetFeedback, setResetFeedback] = useState<{ type: 'success' | 'error'; message: string; copied?: boolean } | null>(null);
   const [copiedInfo, setCopiedInfo] = useState(false);
+
+  // Helper untuk mendeteksi akun siswa dengan referensi kelas yatim / sekolah tidak terhubung
+  const isStudentNeedingReconciliation = (s: User) => {
+    const classExists = s.classId ? classes.some(c => c.id === s.classId) : false;
+    const schoolExists = s.schoolId ? schools.some(sch => sch.id === s.schoolId) : false;
+    return Boolean((s.classId && !classExists) || !s.schoolId || !schoolExists || (s as any).needsReconciliation || (s as any).isOrphanClass);
+  };
+
+  const reconciliationCount = students.filter(s => s.role === 'siswa' && isStudentNeedingReconciliation(s)).length;
 
   // Available classes based on selected school
   const availableClasses = classes.filter(c => {
@@ -54,6 +72,10 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
   // Filter students (only role === 'siswa')
   const filteredStudents = students.filter(s => {
     if (s.role !== 'siswa') return false;
+
+    if (filterReconciliationOnly && !isStudentNeedingReconciliation(s)) {
+      return false;
+    }
 
     // Filter School
     const matchSchool = selectedSchoolId === 'ALL' ||
@@ -74,6 +96,58 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
 
     return matchSchool && matchClass && matchSearch;
   });
+
+  const handleOpenReconciliationModal = (student: User) => {
+    setReconcilingStudent(student);
+    const initialSchool = schools.find(s => s.id === student.schoolId || (student.schoolName && s.name.toLowerCase() === student.schoolName.toLowerCase()));
+    const initialSchoolId = initialSchool?.id || schools[0]?.id || '';
+    setTargetSchoolId(initialSchoolId);
+
+    const schoolClasses = classes.filter(c => c.schoolId === initialSchoolId);
+    const initialClass = schoolClasses.find(c => c.id === student.classId || (student.className && c.name.toLowerCase() === student.className.toLowerCase()));
+    setTargetClassId(initialClass?.id || schoolClasses[0]?.id || '');
+    setReconciliationFeedback(null);
+  };
+
+  const handleCloseReconciliationModal = () => {
+    setReconcilingStudent(null);
+    setReconciliationFeedback(null);
+    setIsSavingReconciliation(false);
+  };
+
+  const handleSaveReconciliation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reconcilingStudent || !onUpdateStudent) return;
+    const selectedSchool = schools.find(s => s.id === targetSchoolId);
+    const selectedClass = classes.find(c => c.id === targetClassId);
+
+    if (!selectedSchool || !selectedClass) {
+      setReconciliationFeedback('Silakan pilih sekolah dan rombel kelas yang sah.');
+      return;
+    }
+
+    setIsSavingReconciliation(true);
+    setReconciliationFeedback(null);
+    try {
+      const updatedUser: User = {
+        ...reconcilingStudent,
+        schoolId: selectedSchool.id,
+        schoolName: selectedSchool.name,
+        classId: selectedClass.id,
+        className: selectedClass.name,
+      };
+      const ok = await onUpdateStudent(updatedUser);
+      if (ok) {
+        setReconcilingStudent(null);
+      } else {
+        setReconciliationFeedback('Gagal menyimpan rekonsiliasi data siswa ke server.');
+      }
+    } catch (err: any) {
+      setReconciliationFeedback(err.message || 'Terjadi kesalahan saat menyimpan.');
+    } finally {
+      setIsSavingReconciliation(false);
+    }
+  };
 
   const handleOpenResetModal = (student: User) => {
     setSelectedStudent(student);
@@ -155,7 +229,7 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
       </div>
 
       {/* Metric Summary Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-1 shadow-md">
           <div className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
             <Users className="w-3.5 h-3.5 text-blue-400" />
@@ -198,6 +272,28 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
             {filteredStudents.length}
           </div>
           <div className="text-[10px] text-slate-500">Siswa sesuai kriteria pencarian</div>
+        </div>
+
+        <div
+          onClick={() => setFilterReconciliationOnly(prev => !prev)}
+          className={`p-4 rounded-2xl border space-y-1 shadow-md cursor-pointer transition-all ${
+            filterReconciliationOnly
+              ? 'bg-amber-950/50 border-amber-500 ring-2 ring-amber-500'
+              : reconciliationCount > 0
+                ? 'bg-slate-900 border-amber-500/40 hover:border-amber-400'
+                : 'bg-slate-900 border-slate-800'
+          }`}
+        >
+          <div className="text-[11px] font-semibold text-amber-400 flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5" />
+            <span>Perlu Rekonsiliasi</span>
+          </div>
+          <div className="text-2xl font-black text-amber-400">
+            {reconciliationCount}
+          </div>
+          <div className="text-[10px] text-slate-400 font-medium">
+            {filterReconciliationOnly ? 'Klik: tampilkan semua' : 'Klik: filter akun yatim'}
+          </div>
         </div>
       </div>
 
@@ -300,30 +396,48 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
                     <div className="flex items-center gap-1.5">
                       <SchoolIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                       <span className="truncate max-w-[200px]" title={std.schoolName}>
-                        {std.schoolName || 'SMK Mitra'}
+                        {std.schoolName || 'Sekolah Belum Terdaftar'}
                       </span>
                     </div>
                   </td>
                   <td className="py-3.5 px-4 text-slate-300">
                     <div className="flex items-center gap-1.5">
                       <GraduationCap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span>{std.className || 'Umum'}</span>
+                      <span>{std.className || 'Kelas Belum Terdaftar'}</span>
                     </div>
                   </td>
                   <td className="py-3.5 px-4 text-center">
-                    <span className="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 inline-flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      <span>Aktif</span>
-                    </span>
+                    {isStudentNeedingReconciliation(std) ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center gap-1">
+                        ⚠️ Perlu Rekonsiliasi
+                      </span>
+                    ) : (
+                      <span className="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 inline-flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" />
+                        <span>Aktif</span>
+                      </span>
+                    )}
                   </td>
                   <td className="py-3.5 px-4 text-right">
-                    <button
-                      onClick={() => handleOpenResetModal(std)}
-                      className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer transition-all border border-amber-500/30 hover:border-transparent shadow-sm"
-                    >
-                      <KeyRound className="w-3.5 h-3.5" />
-                      <span>Reset Password</span>
-                    </button>
+                    <div className="flex items-center justify-end gap-1.5">
+                      {isStudentNeedingReconciliation(std) && onUpdateStudent && (
+                        <button
+                          onClick={() => handleOpenReconciliationModal(std)}
+                          className="px-2.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 cursor-pointer transition-all shadow-sm"
+                          title="Hubungkan akun siswa ke rombel dan sekolah yang valid"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Rekonsiliasi</span>
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleOpenResetModal(std)}
+                        className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer transition-all border border-amber-500/30 hover:border-transparent shadow-sm"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>Reset Sandi</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -482,6 +596,141 @@ export const StudentManager: React.FC<StudentManagerProps> = ({
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isResetting ? 'animate-spin' : ''}`} />
                   <span>{isResetting ? 'Menyimpan...' : 'Terapkan Password Baru'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Rekonsiliasi Rombel & Sekolah */}
+      {reconcilingStudent && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-7 space-y-5 shadow-2xl relative">
+            {/* Header Modal */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center font-bold">
+                  <RefreshCw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Rekonsiliasi Rombel Siswa</h3>
+                  <p className="text-xs text-slate-400">Tautkan akun siswa ke sekolah dan rombel kelas yang sah</p>
+                </div>
+              </div>
+              <button
+                onClick={handleCloseReconciliationModal}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Current Orphan Info Card */}
+            <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/30 space-y-2 text-xs">
+              <div className="flex items-center gap-2 text-amber-300 font-bold">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>Status Akun: Rombel/Sekolah Belum Sah</span>
+              </div>
+              <p className="text-slate-300 text-[11px] leading-relaxed">
+                Akun ini terdaftar dengan referensi sekolah atau kelas yang tidak ditemukan pada master data.
+                Siswa tidak akan dapat mengakses ujian hingga ditautkan ke sekolah dan rombel yang benar.
+              </p>
+              <div className="pt-2 border-t border-amber-500/20 grid grid-cols-2 gap-2 text-slate-300">
+                <div>
+                  <span className="text-slate-500 text-[10px] block">Nama Siswa</span>
+                  <span className="font-semibold text-white">{reconcilingStudent.name}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 text-[10px] block">NIS / Email</span>
+                  <span className="font-mono text-slate-200">{reconcilingStudent.identityNo || reconcilingStudent.email}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 text-[10px] block">Sekolah Saat Ini</span>
+                  <span className="text-slate-300">{reconcilingStudent.schoolName || 'Tidak tercatat (NULL)'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 text-[10px] block">Kelas Saat Ini</span>
+                  <span className="text-slate-300">{reconcilingStudent.className || reconcilingStudent.classId || 'Tidak tercatat (NULL)'}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Selection */}
+            <form onSubmit={handleSaveReconciliation} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Pilih Sekolah Tujuan
+                </label>
+                <div className="relative">
+                  <SchoolIcon className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <select
+                    value={targetSchoolId}
+                    onChange={(e) => {
+                      const newSchId = e.target.value;
+                      setTargetSchoolId(newSchId);
+                      const matchingClasses = classes.filter(c => c.schoolId === newSchId);
+                      setTargetClassId(matchingClasses[0]?.id || '');
+                    }}
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-amber-500"
+                  >
+                    {schools.map(s => (
+                      <option key={s.id} value={s.id}>{s.name} ({s.code || s.npsn || 'Mitra'})</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Pilih Rombel / Kelas Tujuan
+                </label>
+                <div className="relative">
+                  <GraduationCap className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <select
+                    value={targetClassId}
+                    onChange={(e) => setTargetClassId(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-amber-500"
+                  >
+                    {classes.filter(c => c.schoolId === targetSchoolId).length === 0 ? (
+                      <option value="">-- Tidak ada kelas pada sekolah ini --</option>
+                    ) : (
+                      classes.filter(c => c.schoolId === targetSchoolId).map(c => (
+                        <option key={c.id} value={c.id}>{c.name} ({c.academicYear || 'Aktif'})</option>
+                      ))
+                    )}
+                  </select>
+                </div>
+                {classes.filter(c => c.schoolId === targetSchoolId).length === 0 && (
+                  <p className="text-[11px] text-amber-400 mt-1">
+                    Sekolah ini belum memiliki kelas. Buat kelas terlebih dahulu pada tab Manajemen Kelas.
+                  </p>
+                )}
+              </div>
+
+              {reconciliationFeedback && (
+                <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{reconciliationFeedback}</span>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={handleCloseReconciliationModal}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingReconciliation || !targetClassId}
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-xs flex items-center gap-2 cursor-pointer shadow-lg shadow-amber-500/25 transition-all disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSavingReconciliation ? 'animate-spin' : ''}`} />
+                  <span>{isSavingReconciliation ? 'Menyimpan...' : 'Tautkan Rombel & Simpan'}</span>
                 </button>
               </div>
             </form>

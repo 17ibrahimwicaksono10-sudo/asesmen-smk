@@ -49,16 +49,16 @@ export interface DatabaseSchema {
 
 // Fungsi helper untuk menemukan lokasi path database.json yang konsisten
 export function getDatabasePaths(): { targetDir: string; targetFile: string } {
-  if (process.env.VOC_DATABASE_PATH && process.env.VOC_DATABASE_PATH.trim()) {
-    const customFile = path.resolve(process.env.VOC_DATABASE_PATH.trim());
+  const envPath = process.env.VOC_DATABASE_PATH || process.env.DB_FILE_PATH;
+  if (envPath && envPath.trim()) {
+    const customFile = path.resolve(envPath.trim());
     return { targetDir: path.dirname(customFile), targetFile: customFile };
   }
 
   const candidateDirs = [
-    path.resolve(process.cwd(), "backend", "backend", "data"),
+    path.join(__dirname, "../data"),
     path.resolve(process.cwd(), "backend", "data"),
     path.resolve(process.cwd(), "data"),
-    path.join(__dirname, "../data"),
     path.join(__dirname, "../../data"),
   ];
 
@@ -78,7 +78,7 @@ export function getDatabasePaths(): { targetDir: string; targetFile: string } {
   }
 
   // Default fallback
-  const defaultDir = candidateDirs[1] || candidateDirs[0];
+  const defaultDir = candidateDirs[0];
   return { targetDir: defaultDir, targetFile: path.join(defaultDir, "database.json") };
 }
 
@@ -250,11 +250,44 @@ export function saveDb(): boolean {
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
+    // Pertahankan permission 0600 pada database.json
+    let fileMode = 0o600;
+    if (fs.existsSync(targetFile)) {
+      try {
+        fileMode = fs.statSync(targetFile).mode & 0o777;
+      } catch {
+        fileMode = 0o600;
+      }
+    }
     // Penulisan atomik (Atomic Write) melalui berkas temporer untuk mencegah korupsi data saat konkurensi
     const tempFile = path.join(targetDir, `.database.json.tmp.${process.pid}.${Date.now()}`);
-    fs.writeFileSync(tempFile, JSON.stringify(dbCache, null, 2), "utf-8");
-    fs.renameSync(tempFile, targetFile);
-    return true;
+    fs.writeFileSync(tempFile, JSON.stringify(dbCache, null, 2), { encoding: "utf-8", mode: fileMode });
+    
+    let renamed = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        fs.renameSync(tempFile, targetFile);
+        renamed = true;
+        break;
+      } catch (renameErr: any) {
+        if (attempt === 4) {
+          // Fallback jika rename tetap terkunci di Windows: salin dan hapus berkas temp
+          fs.copyFileSync(tempFile, targetFile);
+          try { fs.unlinkSync(tempFile); } catch {}
+          renamed = true;
+          break;
+        }
+        const pauseUntil = Date.now() + 30;
+        while (Date.now() < pauseUntil) {}
+      }
+    }
+
+    try {
+      fs.chmodSync(targetFile, fileMode);
+    } catch {
+      // Abaikan pada filesystem yang tidak mendukung chmod (seperti Windows default)
+    }
+    return renamed;
   } catch (err) {
     console.error("[DB] Gagal menyimpan ke disk:", err);
     return false;

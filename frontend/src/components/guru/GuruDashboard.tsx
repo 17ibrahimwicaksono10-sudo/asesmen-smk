@@ -58,14 +58,18 @@ export const GuruDashboard: React.FC<GuruDashboardProps> = ({
   );
 
   const mySubmissions = submissions.filter(sub => {
-    const matchClass = myClasses.some(c => c.name.toLowerCase().trim() === sub.className?.toLowerCase()?.trim());
+    // Multi-tenant guard: jika schoolId eksplisit berbeda, tolak
+    if (sub.schoolId && currentUser.schoolId && sub.schoolId !== currentUser.schoolId) {
+      return false;
+    }
+    const matchClass = myClasses.some(c => c.name.toLowerCase().trim() === sub.className?.toLowerCase()?.trim() || (sub.classId && c.id === sub.classId));
     const matchExam = myExams.some(e => e.id === sub.examId);
     const matchSchool = (currentUser.schoolId && sub.schoolId === currentUser.schoolId) ||
       (currentUser.schoolName && isSchoolMatch(sub.schoolName, currentUser.schoolName));
     return matchClass || matchExam || matchSchool;
   });
 
-  const displaySubmissions = mySubmissions.length > 0 ? mySubmissions : submissions;
+  const displaySubmissions = mySubmissions;
   const myPackages = packages;
 
   const teknisCount = myPackages.filter(p => p.category === 'teknis_kimia').length;
