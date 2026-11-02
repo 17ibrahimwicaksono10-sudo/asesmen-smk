@@ -54,9 +54,9 @@ const DEFAULT_PROVIDERS: AIProviderConfig[] = [
   },
   {
     id: 'prov-gemini-flash',
-    name: 'gemini-2.5-flash',
+    name: 'gemini-3.8-flash',
     type: 'Gemini',
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3.8-flash',
     apiKey: 'AIzaSy****************7I0E',
     status: 'Active'
   }
@@ -879,7 +879,7 @@ export const SettingsAndArchive: React.FC<SettingsAndArchiveProps> = ({
                 <input
                   type="text"
                   required
-                  placeholder="Contoh: deepseek-chat / gemini-2.5-flash"
+                  placeholder="Contoh: deepseek-chat / gemini-3.8-flash"
                   value={providerForm.model}
                   onChange={(e) => setProviderForm({ ...providerForm, model: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500 font-mono"

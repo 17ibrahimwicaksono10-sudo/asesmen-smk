@@ -31,6 +31,7 @@ import {
   StandardAIEvaluationResult
 } from "./aiEvaluationRouter";
 import { aiQueueManager } from "./aiEvaluationQueue";
+import { getGeminiConfig } from "./aiConfig";
 
 
 export function reloadEnv(): void {
@@ -317,7 +318,7 @@ async function callModalityAI(
         }
       } else if (selectedProvider.type === 'Gemini') {
         const apiKey = selectedProvider.apiKey;
-        const model = selectedProvider.model || 'gemini-2.5-flash';
+        const model = selectedProvider.model || getGeminiConfig().primaryModel;
         const ai = new GoogleGenAI({ apiKey });
         const resp = await ai.models.generateContent({
           model,
@@ -340,12 +341,13 @@ async function callModalityAI(
     return { jsonText, providerName: 'DeepSeek API (.env fallback)' };
   } else {
     const ai = getGenAI();
+    const primaryGemini = getGeminiConfig().primaryModel;
     const resp = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: primaryGemini,
       contents: prompt,
       config: { responseMimeType: 'application/json' },
     });
-    return { jsonText: resp.text || '{}', providerName: 'Gemini 2.5 Flash (.env fallback)' };
+    return { jsonText: resp.text || '{}', providerName: `Gemini (${primaryGemini} .env fallback)` };
   }
 }
 
@@ -2786,8 +2788,9 @@ Output JSON lengkap:
       // Fallback ke Gemini jika DeepSeek tidak aktif
       provider = "gemini";
       const ai = getGenAI();
+      const primaryGemini = getGeminiConfig().primaryModel;
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: primaryGemini,
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });

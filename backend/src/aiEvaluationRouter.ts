@@ -17,6 +17,7 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { getDb, getEvidenceStorageDir } from "./db";
+import { getGeminiConfig, DEFAULT_GEMINI_PRIMARY_MODEL } from "./aiConfig";
 
 export function resolveMediaBase64(mediaDataOrUrl?: string): string {
   if (!mediaDataOrUrl) return '';
@@ -73,9 +74,6 @@ export interface QuestionEvaluationContext {
   maxScore: number;
 }
 
-// Model fallback resmi Google Generative AI (Vision & Multimodal STT)
-const VALID_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"];
-
 function getDeepSeekConfig() {
   const db = getDb();
   const settings = (db.settings as any) || {};
@@ -86,9 +84,7 @@ function getDeepSeekConfig() {
 }
 
 function getGeminiApiKey(): string {
-  const db = getDb();
-  const settings = (db.settings as any) || {};
-  return settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+  return getGeminiConfig().apiKey;
 }
 
 /**
@@ -347,8 +343,9 @@ Berikan output JSON dengan skema persis:
 
   let success = false;
   let lastErr = '';
+  const geminiConfig = getGeminiConfig();
 
-  for (const model of VALID_GEMINI_MODELS) {
+  for (const model of geminiConfig.candidateModels) {
     if (success) break;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -503,8 +500,9 @@ Berikan output JSON dengan format:
   let sttModelUsed = '';
   let isAudioInaudible = false;
   let inaudibleReason = '';
+  const geminiConfig = getGeminiConfig();
 
-  for (const model of VALID_GEMINI_MODELS) {
+  for (const model of geminiConfig.candidateModels) {
     if (sttSuccess) break;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
