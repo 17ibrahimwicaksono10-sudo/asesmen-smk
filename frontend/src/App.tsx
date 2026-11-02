@@ -65,9 +65,21 @@ export default function App() {
     return Array.from(studentMap.values());
   }, [registeredUsers]);
 
-  // Master States: Default kosong murni untuk fresh pilot testing
-  const [schools, setSchools] = useState<School[]>([]);
-  const [classes, setClasses] = useState<ClassRoom[]>([]);
+  // Master States: Inisialisasi awal dengan cache lokal agar status UI konsisten saat refresh
+  const [schools, setSchools] = useState<School[]>(() => {
+    try {
+      const saved = localStorage.getItem('voc_schools');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+  const [classes, setClasses] = useState<ClassRoom[]>(() => {
+    try {
+      const saved = localStorage.getItem('voc_classes');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
 
   // Strictly isolate classes assigned to the active teacher (role === 'guru')
   const guruAssignedClasses = React.useMemo(() => {
@@ -79,19 +91,23 @@ export default function App() {
       return c1 === c2 || c1.includes(c2) || c2.includes(c1);
     };
 
-    const assigned = classes.filter(c => {
-      const matchSchool = (currentUser.schoolId && c.schoolId === currentUser.schoolId) ||
-        (currentUser.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName));
-      if (!matchSchool) return false;
+    // 1. Relasi Otoritatif Langsung: classes.teacherId, assignedClassIds, atau nama pengampu
+    const directlyAssigned = classes.filter(c => 
+      (c.teacherId && c.teacherId === currentUser.id) ||
+      (currentUser.assignedClassIds && currentUser.assignedClassIds.includes(c.id)) ||
+      (c.teacherName && currentUser.name && (
+        c.teacherName.toLowerCase() === currentUser.name.toLowerCase() ||
+        c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase()) ||
+        currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())
+      ))
+    );
 
-      return c.teacherId === currentUser.id ||
-        c.teacherName === currentUser.name ||
-        (currentUser.name && c.teacherName && c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase())) ||
-        (currentUser.name && c.teacherName && currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())) ||
-        (currentUser.assignedClassIds && currentUser.assignedClassIds.includes(c.id));
-    });
+    if (directlyAssigned.length > 0) {
+      return directlyAssigned;
+    }
 
-    return assigned.length > 0 ? assigned : classes.filter(c => 
+    // 2. Fallback: seluruh kelas pada sekolah yang sama dengan guru
+    return classes.filter(c => 
       (currentUser.schoolId && c.schoolId === currentUser.schoolId) ||
       (currentUser.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName))
     );
@@ -275,6 +291,7 @@ export default function App() {
   const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const inFlightPromiseRef = React.useRef<Promise<void> | null>(null);
+  const latestRequestIdRef = React.useRef<number>(0);
 
   // Load persistent data from Backend Database
   const loadBackendData = React.useCallback(async (opts?: { skipTokenRestore?: boolean; force?: boolean }) => {
@@ -282,6 +299,8 @@ export default function App() {
     if (inFlightPromiseRef.current && !opts?.force) {
       return inFlightPromiseRef.current;
     }
+
+    const reqId = ++latestRequestIdRef.current;
 
     const task = (async () => {
       setIsInitialLoading(true);
@@ -329,10 +348,26 @@ export default function App() {
       // 2. Ambil data bootstrap dari backend
       try {
         const json = await apiGet('/api/bootstrap');
+        // Jangan timpa state jika sudah ada request yang lebih mutakhir (Anti Out-of-Order Race Condition)
+        if (reqId !== latestRequestIdRef.current) {
+          console.log('[Frontend] Mengabaikan respons bootstrap basi (outdated response).');
+          return;
+        }
+
         if (json.success && json.data) {
           const { users, schools: s, classes: c, teachers: t, packages: p, exams: e, submissions: sub, archives: a, settings: set, portfolios: port } = json.data;
-          if (Array.isArray(s)) setSchools(s);
-          if (Array.isArray(c)) setClasses(c);
+          if (Array.isArray(s)) {
+            setSchools(s);
+            try {
+              localStorage.setItem('voc_schools', JSON.stringify(s));
+            } catch {}
+          }
+          if (Array.isArray(c)) {
+            setClasses(c);
+            try {
+              localStorage.setItem('voc_classes', JSON.stringify(c));
+            } catch {}
+          }
           if (Array.isArray(t)) {
             setTeachers(t);
             try {
@@ -397,11 +432,15 @@ export default function App() {
           setLoadError(json.error || 'Gagal memuat data dari database.');
         }
       } catch (err: any) {
-        console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
-        setLoadError(err.message || 'Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
+        if (reqId === latestRequestIdRef.current) {
+          console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
+          setLoadError(err.message || 'Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
+        }
       } finally {
-        setIsInitialLoading(false);
-        inFlightPromiseRef.current = null;
+        if (reqId === latestRequestIdRef.current) {
+          setIsInitialLoading(false);
+          inFlightPromiseRef.current = null;
+        }
       }
     })();
 

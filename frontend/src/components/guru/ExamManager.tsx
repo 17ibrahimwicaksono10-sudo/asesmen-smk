@@ -74,17 +74,24 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
   );
 
   const teacherAssignedClasses = classes.filter(c => {
+    // 1. Relasi Otoritatif Langsung: classes.teacherId atau assignedClassIds
+    if (
+      (c.teacherId && c.teacherId === currentUser.id) ||
+      (currentUser.assignedClassIds && currentUser.assignedClassIds.includes(c.id)) ||
+      (c.teacherName && currentUser.name && (
+        c.teacherName.toLowerCase() === currentUser.name.toLowerCase() ||
+        c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase()) ||
+        currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())
+      ))
+    ) {
+      return true;
+    }
+
     const matchSchool = (guruSchool && c.schoolId === guruSchool.id) || 
       (guruSchool && isSchoolMatch(c.schoolName, guruSchool.name)) ||
       (currentUser.schoolId && c.schoolId === currentUser.schoolId) ||
       (currentUser.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName));
-    if (!matchSchool) return false;
-
-    return c.teacherId === currentUser.id || 
-      c.teacherName === currentUser.name ||
-      (currentUser.name && c.teacherName && c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase())) ||
-      (currentUser.name && c.teacherName && currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())) ||
-      (currentUser.assignedClassIds && currentUser.assignedClassIds.includes(c.id));
+    return Boolean(matchSchool);
   });
 
   const [showModal, setShowModal] = useState(false);

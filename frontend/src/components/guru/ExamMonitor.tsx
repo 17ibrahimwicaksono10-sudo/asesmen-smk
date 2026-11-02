@@ -84,18 +84,25 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
   const [filterTab, setFilterTab] = useState<'ALL' | 'PENDING' | 'VALIDATED'>('ALL');
 
+  // 1. Relasi Otoritatif Langsung ke Guru: classes.teacherId atau assignedClassIds
   const teacherAssignedClasses = classes.filter(c => {
+    if (
+      (c.teacherId && c.teacherId === currentUser?.id) ||
+      (currentUser?.assignedClassIds && currentUser.assignedClassIds.includes(c.id)) ||
+      (c.teacherName && currentUser?.name && (
+        c.teacherName.toLowerCase() === currentUser.name.toLowerCase() ||
+        c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase()) ||
+        currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())
+      ))
+    ) {
+      return true;
+    }
+
     const matchSchool = (guruSchool && c.schoolId === guruSchool.id) || 
       (guruSchool && isSchoolMatch(c.schoolName, guruSchool.name)) ||
       (currentUser?.schoolId && c.schoolId === currentUser.schoolId) ||
       (currentUser?.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName));
-    if (!matchSchool) return false;
-
-    return c.teacherId === currentUser?.id || 
-      c.teacherName === currentUser?.name ||
-      (currentUser?.name && c.teacherName && c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase())) ||
-      (currentUser?.name && c.teacherName && currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())) ||
-      (currentUser?.assignedClassIds && currentUser.assignedClassIds.includes(c.id));
+    return Boolean(matchSchool);
   });
 
   const availableClasses = isGuru
@@ -114,6 +121,22 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
     return matchSchool && matchClass;
   });
 
+  // Kumpulkan ujian historis yang ada di riwayat submission agar tidak hilang dari filter guru
+  const historicalExams = React.useMemo(() => {
+    const activeExamIds = new Set(exams.map(e => e.id));
+    const histMap = new Map<string, { id: string; title: string; className?: string }>();
+    submissions.forEach(s => {
+      if (s.examId && !activeExamIds.has(s.examId) && !histMap.has(s.examId)) {
+        histMap.set(s.examId, {
+          id: s.examId,
+          title: s.examTitle || `Ujian Historis (${s.examId.substring(0, 10)}...)`,
+          className: s.className || 'Arsip Ujian'
+        });
+      }
+    });
+    return Array.from(histMap.values());
+  }, [exams, submissions]);
+
   const isSubmissionMatchingFilters = (s: ExamSubmission) => {
     const selectedSchoolObj = schoolsList.find(sch => sch.id === selectedSchoolId);
     const matchSchool = selectedSchoolId === 'ALL' || 
@@ -121,17 +144,18 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
       (selectedSchoolObj && isSchoolMatch(s.schoolName, selectedSchoolObj.name)) ||
       (guruSchool && isSchoolMatch(s.schoolName, guruSchool.name)) ||
       (currentUser?.schoolName && isSchoolMatch(s.schoolName, currentUser.schoolName)) ||
-      (!s.schoolId && !s.schoolName);
+      (isGuru && (!s.schoolId || s.schoolId === currentUser?.schoolId));
 
     const matchClass = selectedClassId === 'ALL' || 
       s.classId === selectedClassId || 
-      (availableClasses.length === 0) ||
-      (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase());
+      (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase().trim() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase().trim());
 
     const matchExam = selectedExamId === 'ALL' || s.examId === selectedExamId;
 
-    return matchSchool && matchClass && matchExam;
+    return Boolean(matchSchool && matchClass && matchExam);
   };
+
+  const allMatchingSubmissions = submissions.filter(isSubmissionMatchingFilters);
 
   const filteredSubmissions = submissions.filter(s => {
     if (!isSubmissionMatchingFilters(s)) return false;
@@ -328,10 +352,17 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               onChange={(e) => setSelectedExamId(e.target.value)}
               className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold text-xs focus:outline-none focus:border-purple-500"
             >
-              <option value="ALL">Semua Sesi Ujian ({availableExams.length})</option>
+              <option value="ALL">Semua Sesi Ujian ({availableExams.length + historicalExams.length})</option>
               {availableExams.map(e => (
                 <option key={e.id} value={e.id}>{e.title} ({e.className || 'Semua Kelas'}) - [{(e.status || 'draft').toUpperCase()}]</option>
               ))}
+              {historicalExams.length > 0 && (
+                <optgroup label="Sesi Ujian Historis (Arsip)">
+                  {historicalExams.map(e => (
+                    <option key={e.id} value={e.id}>{e.title} ({e.className}) - [HISTORIS]</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </div>
         </div>
@@ -360,7 +391,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span>Semua Berkas ({submissions.length})</span>
+          <span>Semua Berkas ({allMatchingSubmissions.length})</span>
         </button>
 
         <button

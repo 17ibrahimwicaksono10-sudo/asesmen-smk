@@ -390,8 +390,274 @@ app.get("/api/admin/ai-queue/status", requireAuth, requireRole("admin"), (_req: 
 });
 
 // -------------------------------------------------------------
-// Bootstrap: Ambil semua data awal dalam 1 request
+// Relasi Otoritatif Akses Guru ke Submission Historis & Sekolah
 // -------------------------------------------------------------
+export interface VerifiedSubmissionRelation {
+  authorized: boolean;
+  resolvedSchoolId?: string;
+  resolvedSchoolName?: string;
+  resolvedClassId?: string;
+  resolvedClassName?: string;
+  resolvedExamTitle?: string;
+  verificationSource?: string;
+}
+
+const KNOWN_CITIES = [
+  'bandung', 'surabaya', 'jakarta', 'semarang', 'malang', 'yogyakarta', 'jogja',
+  'bogor', 'bekasi', 'tangerang', 'depok', 'medan', 'makassar', 'palembang',
+  'padang', 'denpasar', 'cirebon', 'solo', 'surakarta', 'cimahi', 'tasikmalaya',
+  'sukabumi', 'serang', 'cilegon', 'magelang', 'pekalongan', 'tegal', 'purwokerto',
+  'kediri', 'blitar', 'madiun', 'probolinggo', 'pasuruan', 'batu', 'samarinda',
+  'balikpapan', 'pontianak', 'banjarmasin', 'manado', 'ambon', 'jayapura', 'kupang',
+  'mataram', 'lampung', 'jambi', 'bengkulu', 'pekanbaru', 'batam', 'pangkalpinang'
+];
+
+export function isSchoolMatchStrict(s1?: string, s2?: string): boolean {
+  if (!s1 || !s2) return false;
+  const raw1 = s1.toLowerCase().trim();
+  const raw2 = s2.toLowerCase().trim();
+  if (!raw1 || !raw2) return false;
+
+  const c1 = raw1.replace(/[^a-z0-9]/g, '');
+  const c2 = raw2.replace(/[^a-z0-9]/g, '');
+  if (c1 === c2) return true;
+
+  // 1. CEK KONFLIK KOTA/WILAYAH: Jika kedua nama menyebutkan kota yang berbeda, HARUS FALSE (Multi-Tenant Isolation)
+  const extractCity = (str: string) => {
+    return KNOWN_CITIES.find(city => {
+      const reg = new RegExp(`(^|[^a-z])${city}([^a-z]|$)`, 'i');
+      return reg.test(str);
+    });
+  };
+  const city1 = extractCity(raw1);
+  const city2 = extractCity(raw2);
+  if (city1 && city2 && city1 !== city2) {
+    return false; // Konflik mutlak: Bandung != Surabaya
+  }
+
+  // 2. CEK KONFLIK NOMOR SEKOLAH (Misal: SMKN 1 vs SMKN 2)
+  const extractNumber = (str: string) => {
+    const match = str.match(/(?:smk|smkn|negeri|sekolah)\s*(\d+)/i) || str.match(/\b(\d+)\b/);
+    return match ? match[1] : null;
+  };
+  const num1 = extractNumber(raw1);
+  const num2 = extractNumber(raw2);
+  if (num1 && num2 && num1 !== num2) {
+    return false; // Konflik nomor: SMKN 1 != SMKN 2
+  }
+
+  // 3. Stop words umum sekolah kejuruan yang BUKAN identitas unik
+  const genericWords = new Set([
+    'smk', 'smkn', 'sma', 'sman', 'smp', 'smpn', 'sekolah', 'menengah', 'kejuruan',
+    'negeri', 'swasta', 'vokasi', 'nasional', 'terpadu', 'indonesia',
+    'kimia', 'industri', 'teknik', 'analis', 'farmasi', 'mesin', 'otomotif',
+    'elektro', 'informatika', 'komputer', 'rpl', 'tkj', 'multimedia',
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'
+  ]);
+
+  const tokens1 = raw1.split(/[\s,.-]+/).filter(t => t.length >= 3 && !genericWords.has(t));
+  const tokens2 = raw2.split(/[\s,.-]+/).filter(t => t.length >= 3 && !genericWords.has(t));
+
+  // Jika kedua string memiliki kota yang sama (misal "bandung")
+  if (city1 && city2 && city1 === city2) {
+    return true;
+  }
+
+  // Jika salah satu string hanya menyebut nama kota (misal submission historis dengan schoolName = "Bandung")
+  if ((city1 && !city2 && raw2 === city1) || (city2 && !city1 && raw1 === city2)) {
+    return true;
+  }
+
+  // Jika memiliki token unik non-generik yang sama persis (misal nama yayasan atau nama khas)
+  if (tokens1.length > 0 && tokens2.length > 0) {
+    const commonUnique = tokens1.filter(t => tokens2.includes(t));
+    if (commonUnique.length > 0) {
+      return true;
+    }
+  }
+
+  // Jika salah satu adalah substring utuh dari yang lain dan tidak ada konflik kota/nomor
+  if (c1.length >= 8 && c2.length >= 8) {
+    if (c1.includes(c2) || c2.includes(c1)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function verifySubmissionTeacherAccess(
+  sub: ExamSubmission,
+  user: AuthPayload,
+  db: DatabaseSchema
+): VerifiedSubmissionRelation {
+  if (!user || user.role !== 'guru') {
+    return { authorized: false };
+  }
+
+  // 0. ABSOLUTE MULTI-TENANT GUARD: Jika sub memiliki schoolId eksplisit yang berbeda dengan user.schoolId
+  if (sub.schoolId && user.schoolId && sub.schoolId !== user.schoolId) {
+    return { authorized: false };
+  }
+
+  // Cari kelas guru dari db.classes berdasarkan relasi otoritatif classes.teacherId
+  const teacherUser = (db.users || []).find(u => u.id === user.userId || (u.email && user.email && u.email.toLowerCase() === user.email.toLowerCase()));
+  const teacherClasses = (db.classes || []).filter(c => 
+    c.teacherId === user.userId || 
+    (c.teacherName && user.name && c.teacherName.toLowerCase() === user.name.toLowerCase()) ||
+    (teacherUser?.assignedClassIds && teacherUser.assignedClassIds.includes(c.id))
+  );
+
+  // 1. Direct Teacher Class match (berdasarkan classId atau className)
+  if (sub.classId) {
+    const matchedClass = teacherClasses.find(c => c.id === sub.classId);
+    if (matchedClass) {
+      return {
+        authorized: true,
+        resolvedSchoolId: matchedClass.schoolId || user.schoolId,
+        resolvedSchoolName: matchedClass.schoolName || user.schoolName,
+        resolvedClassId: matchedClass.id,
+        resolvedClassName: matchedClass.name,
+        verificationSource: 'teacher_class_id'
+      };
+    }
+  }
+  if (sub.className) {
+    const cleanSubClass = sub.className.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+    const matchedClass = teacherClasses.find(c => c.name.toLowerCase().trim().replace(/[^a-z0-9]/g, '') === cleanSubClass);
+    if (matchedClass) {
+      return {
+        authorized: true,
+        resolvedSchoolId: matchedClass.schoolId || user.schoolId,
+        resolvedSchoolName: matchedClass.schoolName || user.schoolName,
+        resolvedClassId: matchedClass.id,
+        resolvedClassName: matchedClass.name,
+        verificationSource: 'teacher_class_name'
+      };
+    }
+  }
+
+  // 2. Direct School ID match
+  if (sub.schoolId && user.schoolId && sub.schoolId === user.schoolId) {
+    return {
+      authorized: true,
+      resolvedSchoolId: sub.schoolId,
+      resolvedSchoolName: sub.schoolName || user.schoolName,
+      verificationSource: 'school_id'
+    };
+  }
+
+  // 3. Kelas-kelas dalam sekolah guru
+  const schoolClasses = (db.classes || []).filter(c => 
+    (user.schoolId && c.schoolId === user.schoolId) ||
+    (user.schoolName && isSchoolMatchStrict(c.schoolName, user.schoolName))
+  );
+
+  if (sub.classId) {
+    const matchedSchoolClass = schoolClasses.find(c => c.id === sub.classId);
+    if (matchedSchoolClass) {
+      return {
+        authorized: true,
+        resolvedSchoolId: matchedSchoolClass.schoolId || user.schoolId,
+        resolvedSchoolName: matchedSchoolClass.schoolName || user.schoolName,
+        resolvedClassId: matchedSchoolClass.id,
+        resolvedClassName: matchedSchoolClass.name,
+        verificationSource: 'school_class_id'
+      };
+    }
+  }
+  if (sub.className) {
+    const cleanSubClass = sub.className.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+    const matchedSchoolClass = schoolClasses.find(c => c.name.toLowerCase().trim().replace(/[^a-z0-9]/g, '') === cleanSubClass);
+    if (matchedSchoolClass) {
+      return {
+        authorized: true,
+        resolvedSchoolId: matchedSchoolClass.schoolId || user.schoolId,
+        resolvedSchoolName: matchedSchoolClass.schoolName || user.schoolName,
+        resolvedClassId: matchedSchoolClass.id,
+        resolvedClassName: matchedSchoolClass.name,
+        verificationSource: 'school_class_name'
+      };
+    }
+  }
+
+  // 4. Relasi Siswa Terverifikasi di db.users (NIS / ID / Email)
+  const student = (db.users || []).find(u => 
+    (sub.studentId && u.id === sub.studentId) ||
+    (sub.studentNis && u.identityNo && u.identityNo === sub.studentNis) ||
+    (sub.studentEmail && u.email && u.email.toLowerCase() === sub.studentEmail.toLowerCase())
+  );
+  if (student) {
+    const isStudentSchool = (student.schoolId && user.schoolId && student.schoolId === user.schoolId) ||
+      (student.schoolName && user.schoolName && isSchoolMatchStrict(student.schoolName, user.schoolName));
+    if (isStudentSchool) {
+      const studentClass = student.classId 
+        ? (db.classes || []).find(c => c.id === student.classId)
+        : (student.className ? (db.classes || []).find(c => c.name.toLowerCase().trim() === student.className?.toLowerCase()?.trim()) : undefined);
+      return {
+        authorized: true,
+        resolvedSchoolId: student.schoolId || user.schoolId,
+        resolvedSchoolName: student.schoolName || user.schoolName,
+        resolvedClassId: studentClass?.id || student.classId || sub.classId,
+        resolvedClassName: studentClass?.name || student.className || sub.className,
+        verificationSource: 'student_user_record'
+      };
+    }
+  }
+
+  // 5. Relasi Ujian di db.exams atau db.archives
+  const exam = (db.exams || []).find(e => e.id === sub.examId);
+  if (exam) {
+    const isExamTeacher = exam.teacherId === user.userId || (exam.teacherName && user.name && exam.teacherName.toLowerCase() === user.name.toLowerCase());
+    const isExamSchool = (exam.schoolId && user.schoolId && exam.schoolId === user.schoolId) ||
+      (exam.schoolName && user.schoolName && isSchoolMatchStrict(exam.schoolName, user.schoolName));
+    if (isExamTeacher || isExamSchool) {
+      return {
+        authorized: true,
+        resolvedSchoolId: exam.schoolId || user.schoolId,
+        resolvedSchoolName: exam.schoolName || user.schoolName,
+        resolvedClassId: exam.classId || sub.classId,
+        resolvedClassName: exam.className || sub.className,
+        resolvedExamTitle: exam.title,
+        verificationSource: isExamTeacher ? 'exam_teacher' : 'exam_school'
+      };
+    }
+  }
+
+  const archive = (db.archives || []).find(a => a.id === sub.examId || (a.data && a.data.id === sub.examId));
+  if (archive) {
+    const archData = archive.data || {};
+    const isArchSchool = (archive.schoolId && user.schoolId && archive.schoolId === user.schoolId) ||
+      (archData.schoolId && user.schoolId && archData.schoolId === user.schoolId) ||
+      (archData.schoolName && user.schoolName && isSchoolMatchStrict(archData.schoolName, user.schoolName)) ||
+      (archData.teacherId && archData.teacherId === user.userId);
+    if (isArchSchool) {
+      return {
+        authorized: true,
+        resolvedSchoolId: user.schoolId,
+        resolvedSchoolName: user.schoolName,
+        resolvedExamTitle: archive.title || archData.title,
+        verificationSource: 'exam_archive'
+      };
+    }
+  }
+
+  // 6. Nama Sekolah Terverifikasi (Ketat: cegah kebocoran antar sekolah)
+  if (sub.schoolName && user.schoolName) {
+    if (isSchoolMatchStrict(sub.schoolName, user.schoolName)) {
+      return {
+        authorized: true,
+        resolvedSchoolId: user.schoolId,
+        resolvedSchoolName: user.schoolName,
+        verificationSource: 'school_name_verified'
+      };
+    }
+  }
+
+  // Tidak dapat dibuktikan kepemilikannya: tolak akses guru (akan ditandai untuk rekonsiliasi admin)
+  return { authorized: false };
+}
+
 // -------------------------------------------------------------
 // Endpoint Ringkasan Dashboard (Ringan & Cepat < 2 KB)
 // -------------------------------------------------------------
@@ -423,32 +689,25 @@ app.get("/api/dashboard/summary", optionalAuth, (req: AuthenticatedRequest, res:
   }
 
   if (user.role === "guru") {
-    const isSchoolMatch = (s1?: string, s2?: string) => {
-      if (!s1 || !s2) return false;
-      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
-    };
-
+    const teacherUser = (db.users || []).find(u => u.id === user.userId || (u.email && user.email && u.email.toLowerCase() === user.email.toLowerCase()));
     const myClasses = (db.classes || []).filter(c =>
       c.teacherId === user.userId ||
-      c.teacherName === user.name ||
+      (c.teacherName && user.name && c.teacherName.toLowerCase() === user.name.toLowerCase()) ||
+      (teacherUser?.assignedClassIds && teacherUser.assignedClassIds.includes(c.id)) ||
       (user.schoolId && c.schoolId === user.schoolId) ||
-      (user.schoolName && isSchoolMatch(c.schoolName, user.schoolName))
+      (user.schoolName && isSchoolMatchStrict(c.schoolName, user.schoolName))
     );
 
     const myExams = (db.exams || []).filter(e =>
       e.teacherId === user.userId ||
-      e.teacherName === user.name ||
+      (e.teacherName && user.name && e.teacherName.toLowerCase() === user.name.toLowerCase()) ||
       (user.schoolId && e.schoolId === user.schoolId) ||
-      (user.schoolName && isSchoolMatch(e.schoolName, user.schoolName))
+      (user.schoolName && isSchoolMatchStrict(e.schoolName, user.schoolName))
     );
 
-    const mySubmissions = (db.submissions || []).filter(sub => {
-      const matchClass = myClasses.some(c => c.name.toLowerCase() === sub.className?.toLowerCase());
-      const matchExam = myExams.some(e => e.id === sub.examId);
-      return matchClass || matchExam;
-    });
+    const mySubmissions = (db.submissions || []).filter(sub => 
+      verifySubmissionTeacherAccess(sub, user, db).authorized
+    );
 
     return res.json({
       success: true,
@@ -539,20 +798,8 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       (req.user?.email && (s as any).studentEmail?.toLowerCase() === req.user.email.toLowerCase())
     );
   } else if (req.user.role === 'guru') {
-    // Guru hanya menerima submission sekolah & kelas binaannya (Ketat: Larang kebocoran lintas sekolah)
-    const isSchoolMatch = (s1?: string, s2?: string) => {
-      if (!s1 || !s2) return false;
-      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
-    };
-    rawSubmissions = rawSubmissions.filter(s => {
-      const matchSchool = (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
-        (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName));
-      if (!matchSchool) return false;
-      if (req.user?.classId && s.classId && req.user.classId !== s.classId) return false;
-      return true;
-    });
+    // Guru hanya menerima submission sekolah & kelas binaannya berdasarkan relasi terverifikasi
+    rawSubmissions = rawSubmissions.filter(s => verifySubmissionTeacherAccess(s, req.user!, db).authorized);
   }
 
   const safeSubmissions = rawSubmissions.map(s => {
@@ -563,18 +810,57 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
         })
       : [];
 
+    // Resolusi metadata efektif (schoolId, schoolName, classId, className, examTitle)
+    let resolvedSchoolId = s.schoolId;
+    let resolvedSchoolName = s.schoolName;
+    let resolvedClassId = s.classId;
+    let resolvedClassName = s.className;
+    let resolvedExamTitle = s.examTitle;
+
+    // Jika informasi belum lengkap, lakukan resolusi via relasi otentik
+    if (!resolvedSchoolId || !resolvedSchoolName || !resolvedClassId || !resolvedExamTitle) {
+      // 1. Data Siswa Terverifikasi di db.users
+      const studentUser = (db.users || []).find(u =>
+        (s.studentId && u.id === s.studentId) ||
+        (s.studentNis && u.identityNo && u.identityNo === s.studentNis) ||
+        (s.studentEmail && u.email && u.email.toLowerCase() === s.studentEmail.toLowerCase())
+      );
+      if (studentUser) {
+        if (!resolvedSchoolId) resolvedSchoolId = studentUser.schoolId;
+        if (!resolvedSchoolName) resolvedSchoolName = studentUser.schoolName;
+        if (!resolvedClassId) resolvedClassId = studentUser.classId;
+        if (!resolvedClassName) resolvedClassName = studentUser.className;
+      }
+
+      // 2. Data Ujian di db.exams atau db.archives
+      const examObj = (db.exams || []).find(e => e.id === s.examId);
+      if (examObj) {
+        if (!resolvedSchoolId) resolvedSchoolId = examObj.schoolId;
+        if (!resolvedSchoolName) resolvedSchoolName = examObj.schoolName;
+        if (!resolvedClassId) resolvedClassId = examObj.classId;
+        if (!resolvedClassName) resolvedClassName = examObj.className;
+        if (!resolvedExamTitle) resolvedExamTitle = examObj.title;
+      }
+    }
+
+    const effectiveSchoolId = resolvedSchoolId;
+    const effectiveSchoolName = resolvedSchoolName;
+    const effectiveClassId = resolvedClassId;
+    const effectiveClassName = resolvedClassName;
+    const effectiveExamTitle = resolvedExamTitle || (s.examId ? `Ujian Historis (${s.examId})` : 'Ujian Tanpa Judul');
+
     return {
       id: s.id,
       examId: s.examId,
-      examTitle: s.examTitle,
+      examTitle: effectiveExamTitle,
       studentId: s.studentId,
       studentName: s.studentName,
       studentNis: s.studentNis,
       studentEmail: s.studentEmail,
-      schoolId: s.schoolId,
-      schoolName: s.schoolName,
-      classId: s.classId,
-      className: s.className,
+      schoolId: effectiveSchoolId,
+      schoolName: effectiveSchoolName,
+      classId: effectiveClassId,
+      className: effectiveClassName,
       submitTime: s.submitTime,
       totalScore: s.totalScore,
       technicalScore: s.technicalScore,
@@ -596,6 +882,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       teacherFollowUp: s.teacherFollowUp,
       evidences: safeEvidences,
       evidenceCount: safeEvidences.length,
+      needsReconciliation: req.user?.role === 'admin' ? (!effectiveSchoolId && !effectiveSchoolName) : undefined,
       // Jawaban rincian: Siswa hanya menerima miliknya sendiri. Guru/Admin mengambil detail per-submission on-demand via GET /api/submissions/:id
       answers: req.user?.role === 'siswa' && s.studentId === req.user?.userId ? s.answers : undefined,
     };
@@ -1472,20 +1759,8 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
       (req.user?.name && s.studentName?.toLowerCase() === req.user.name.toLowerCase())
     );
   } else if (req.user?.role === "guru") {
-    // Guru hanya melihat submission sekolah & kelas binaannya (Ketat: Larang kebocoran lintas sekolah)
-    const isSchoolMatch = (s1?: string, s2?: string) => {
-      if (!s1 || !s2) return false;
-      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
-    };
-    list = list.filter(s => {
-      const matchSchool = (req.user?.schoolId && s.schoolId === req.user.schoolId) ||
-        (req.user?.schoolName && isSchoolMatch(s.schoolName, req.user.schoolName));
-      if (!matchSchool) return false;
-      if (req.user?.classId && s.classId && req.user.classId !== s.classId) return false;
-      return true;
-    });
+    // Guru hanya melihat submission sekolah & kelas binaannya berdasarkan relasi terverifikasi
+    list = list.filter(s => verifySubmissionTeacherAccess(s, req.user!, db).authorized);
   }
 
   // Filter query params
@@ -1559,15 +1834,8 @@ app.get("/api/submissions/:id", requireAuth, (req: AuthenticatedRequest, res: Re
       });
     }
   } else if (req.user?.role === 'guru') {
-    const isSchoolMatch = (s1?: string, s2?: string) => {
-      if (!s1 || !s2) return false;
-      const c1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const c2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return c1 === c2 || c1.includes(c2) || c2.includes(c1);
-    };
-    const matchSchool = (req.user.schoolId && sub.schoolId === req.user.schoolId) ||
-      (req.user.schoolName && isSchoolMatch(sub.schoolName, req.user.schoolName));
-    if (!matchSchool) {
+    const verification = verifySubmissionTeacherAccess(sub, req.user, db);
+    if (!verification.authorized) {
       return res.status(403).json({
         success: false,
         error: "Akses ditolak: Hasil ujian ini berada di luar kewenangan sekolah Anda.",

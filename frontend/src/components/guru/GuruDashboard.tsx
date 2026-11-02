@@ -27,13 +27,22 @@ export const GuruDashboard: React.FC<GuruDashboardProps> = ({
   };
 
   const assigned = classes.filter(c => {
+    // 1. Relasi Otoritatif Langsung: classes.teacherId atau assignedClassIds
+    if (
+      (c.teacherId && c.teacherId === currentUser.id) ||
+      (currentUser.assignedClassIds && currentUser.assignedClassIds.includes(c.id)) ||
+      (c.teacherName && currentUser.name && (
+        c.teacherName.toLowerCase() === currentUser.name.toLowerCase() ||
+        c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase()) ||
+        currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())
+      ))
+    ) {
+      return true;
+    }
+
     const matchSchool = (currentUser.schoolId && c.schoolId === currentUser.schoolId) ||
       (currentUser.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName));
-    if (!matchSchool) return false;
-    return c.teacherId === currentUser.id || 
-      c.teacherName === currentUser.name ||
-      (currentUser.name && c.teacherName && c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase())) ||
-      (currentUser.assignedClassIds && currentUser.assignedClassIds.includes(c.id));
+    return Boolean(matchSchool);
   });
 
   const myClasses = assigned.length > 0 ? assigned : classes.filter(c => 
@@ -49,9 +58,11 @@ export const GuruDashboard: React.FC<GuruDashboardProps> = ({
   );
 
   const mySubmissions = submissions.filter(sub => {
-    const matchClass = myClasses.some(c => c.name.toLowerCase() === sub.className?.toLowerCase());
+    const matchClass = myClasses.some(c => c.name.toLowerCase().trim() === sub.className?.toLowerCase()?.trim());
     const matchExam = myExams.some(e => e.id === sub.examId);
-    return matchClass || matchExam;
+    const matchSchool = (currentUser.schoolId && sub.schoolId === currentUser.schoolId) ||
+      (currentUser.schoolName && isSchoolMatch(sub.schoolName, currentUser.schoolName));
+    return matchClass || matchExam || matchSchool;
   });
 
   const displaySubmissions = mySubmissions.length > 0 ? mySubmissions : submissions;

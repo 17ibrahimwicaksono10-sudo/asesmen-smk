@@ -192,33 +192,40 @@ export function initDb(): DatabaseSchema {
       if (!Array.isArray(dbCache.portfolios)) {
         dbCache.portfolios = [];
       }
+      let changed = false;
       // Pastikan paket bawaan tersedia jika belum ada, tanpa merusak paket kustom guru/admin
       if (Array.isArray(dbCache.packages)) {
         const hasEmp = dbCache.packages.some(p => p.id === 'pkg-employability-18');
         if (!hasEmp) {
           dbCache.packages.unshift(DEFAULT_EMPLOYABILITY_PACKAGE);
+          changed = true;
         }
         const hasTech = dbCache.packages.some(p => p.id === 'pkg-full-24' || p.id === 'pkg-teknis-kimia-24');
         if (!hasTech) {
           dbCache.packages.push(FULL_TECHNICAL_CHEMISTRY_PACKAGE[0]);
+          changed = true;
         }
       }
 
       // Migrasi Base64 bukti multimodal HANYA dijalankan jika diizinkan secara eksplisit via environment variable
       if (process.env.RUN_AUTO_MIGRATION === 'true') {
         const evidenceDir = getEvidenceStorageDir();
-        migrateEvidenceBase64(dbCache, evidenceDir);
+        if (migrateEvidenceBase64(dbCache, evidenceDir)) {
+          changed = true;
+        }
       }
 
-      // Simpan jika ada perubahan paket atau hasil migrasi
-      fs.writeFileSync(targetFile, JSON.stringify(dbCache, null, 2), "utf-8");
+      // Simpan HANYA jika ada perubahan paket atau hasil migrasi
+      if (changed) {
+        saveDb();
+      }
 
       console.log(`[DB] Database berhasil dimuat dari ${targetFile}`);
       return dbCache;
     } else {
       console.log(`[DB] Database belum ada. Membuat data awal di ${targetFile}`);
       dbCache = getInitialData();
-      fs.writeFileSync(targetFile, JSON.stringify(dbCache, null, 2), "utf-8");
+      saveDb();
       return dbCache;
     }
   } catch (err) {
@@ -243,7 +250,10 @@ export function saveDb(): boolean {
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
-    fs.writeFileSync(targetFile, JSON.stringify(dbCache, null, 2), "utf-8");
+    // Penulisan atomik (Atomic Write) melalui berkas temporer untuk mencegah korupsi data saat konkurensi
+    const tempFile = path.join(targetDir, `.database.json.tmp.${process.pid}.${Date.now()}`);
+    fs.writeFileSync(tempFile, JSON.stringify(dbCache, null, 2), "utf-8");
+    fs.renameSync(tempFile, targetFile);
     return true;
   } catch (err) {
     console.error("[DB] Gagal menyimpan ke disk:", err);
