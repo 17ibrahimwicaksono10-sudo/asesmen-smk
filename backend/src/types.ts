@@ -359,6 +359,7 @@ export interface ExamSubmission {
   allowRetake?: boolean;
   answers: Record<string, StudentAnswer>;
   totalScore: number;
+  score?: number;                // Alias kompatibilitas untuk totalScore
   rawScoreTotal?: number;
   maxRawScore?: number;
   technicalScore: number;
@@ -369,6 +370,8 @@ export interface ExamSubmission {
   teacherScoreTotal?: number;    // Final score confirmed by human teacher
   hasPendingComponents?: boolean; // True jika masih ada komponen wajib yang belum dinilai
   isScoreFinal?: boolean;         // True jika seluruh komponen telah dinilai dan disahkan
+  isTeacherValidated?: boolean;   // Status validasi penguji
+  teacherNotes?: string;         // Catatan verifikasi guru
   status: 'perlu_pemeriksaan' | 'dinilai';
   validationStatus?: 'pending_review' | 'approved' | 'revised' | 'returned';
   validatedBy?: string;          // Teacher name/NIP validator identity
@@ -481,6 +484,8 @@ export interface SystemSettings {
   deepseekModel?: string;
   deepseekEnabled?: boolean;
   deepseekBaseUrl?: string;
+  geminiApiKey?: string;
+  geminiBaseUrl?: string;
 }
 
 export interface ArchivedItem {

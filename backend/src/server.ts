@@ -1082,7 +1082,7 @@ app.post("/api/admin/reset-database", requireAuth, requireRole("admin"), (_req: 
 // -------------------------------------------------------------
 app.post("/api/auth/register", (req: Request, res: Response) => {
   try {
-    const { name, email, password, identityNo, role, schoolName, className, classId } = req.body;
+    const { name, email, password, identityNo, role, schoolId, schoolName, className, classId } = req.body;
 
     if (!name || !email) {
       return res.status(400).json({ success: false, error: "Nama dan email wajib diisi." });
@@ -1098,6 +1098,8 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
       }
       if (className && !existing.className) existing.className = className.trim();
       if (classId && !existing.classId) existing.classId = classId.trim();
+      if (schoolId && !existing.schoolId) existing.schoolId = schoolId.trim();
+      if (schoolName && !existing.schoolName) existing.schoolName = schoolName.trim();
       saveDb();
       const token = generateAuthToken(existing);
       return res.json({ success: true, user: sanitizeUser(existing), token, message: "User sudah terdaftar." });
@@ -1110,6 +1112,7 @@ app.post("/api/auth/register", (req: Request, res: Response) => {
       password: hashPassword(userPassword),
       role: role || "siswa",
       identityNo: identityNo?.trim() || `NIS-${Date.now().toString().slice(-5)}`,
+      schoolId: schoolId?.trim(),
       schoolName: schoolName?.trim() || "SMK Mitra Industri",
       className: className?.trim(),
       classId: classId?.trim(),
@@ -1134,11 +1137,11 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
 
   const cleanEmail = email.trim().toLowerCase();
   const db = getDb();
-  let user = db.users.find((u) => u.email.toLowerCase() === cleanEmail);
+  let user = (db.users || []).find((u) => u.email.toLowerCase() === cleanEmail);
 
   // If not found in db.users, check db.teachers and auto-register
   if (!user) {
-    const teacher = db.teachers.find((t) => t.email.toLowerCase() === cleanEmail);
+    const teacher = (db.teachers || []).find((t) => t.email.toLowerCase() === cleanEmail);
     if (teacher) {
       user = {
         id: teacher.id,
@@ -2224,14 +2227,14 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     submission.employabilityScore = 0;
   }
 
-  const hasSubjective = canonicalQuestions.some(q => q.type === 'essay' || q.type === 'analisis_kasus');
+  const hasSubjective = canonicalQuestions.some(q => ['essay', 'analisis_kasus', 'scenario_assessment', 'short_answer', 'essay_subquestions'].includes(q.type));
   const hasMultimodalEvidence = Boolean(
     (submission.evidences && submission.evidences.length > 0) ||
     Object.values(submission.answers || {}).some((a: any) => a.multimodalEvidences && a.multimodalEvidences.length > 0)
   );
   // Periksa apakah masih ada komponen esai/subjektif yang belum dinilai (pending / undefined)
   const hasPendingComponents = canonicalQuestions.some(q => {
-    const isSubjective = ['essay', 'analisis_kasus', 'scenario_assessment'].includes(q.type);
+    const isSubjective = ['essay', 'analisis_kasus', 'scenario_assessment', 'short_answer', 'essay_subquestions'].includes(q.type);
     const ans = enrichedAnswers[q.id];
     return isSubjective && typeof ans?.score !== 'number';
   });
@@ -2376,6 +2379,10 @@ app.post("/api/submissions", optionalAuth, (req: AuthenticatedRequest, res: Resp
 
   // Amankan berkas multimodal ke disk fisik (hapus Base64)
   extractEvidenceBase64FromSubmission(submission);
+
+  if (!Array.isArray(db.submissions)) {
+    db.submissions = [];
+  }
 
   // Kunci Idempoten: Cek apakah submission untuk (examId, studentId) atau (examId, studentNis) sudah ada
   const existingIdx = db.submissions.findIndex(s =>
@@ -3541,7 +3548,9 @@ Berikan JSON:
     : `Ekstrak dan kelompokkan isi dokumen kerja ini ke dalam teks ringkas yang terstruktur.`;
 
   let aiWorked = false;
-  const apiKey = process.env.GEMINI_API_KEY;
+  const dbSettings = (getDb().settings as any) || {};
+  const apiKey = dbSettings.geminiApiKey || process.env.GEMINI_API_KEY;
+  const geminiBaseUrl = (dbSettings.geminiBaseUrl || process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
   if (rawFileData && apiKey) {
     const base64Clean = rawFileData.replace(/^data:[^;]+;base64,/, "");
     const mimeType = rawFileData.split(";")[0]?.replace("data:", "") || (isAudio ? "audio/webm" : "image/jpeg");
@@ -3551,7 +3560,7 @@ Berikan JSON:
       if (aiWorked) break;
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const url = `${geminiBaseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
           const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

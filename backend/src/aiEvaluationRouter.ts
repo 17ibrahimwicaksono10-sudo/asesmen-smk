@@ -80,15 +80,21 @@ function getDeepSeekConfig() {
   const db = getDb();
   const settings = (db.settings as any) || {};
   const apiKey = settings.deepseekApiKey || process.env.DEEPSEEK_API_KEY || "";
-  const model = settings.deepseekModel || "deepseek-chat";
-  const baseUrl = (settings.deepseekBaseUrl || "https://api.deepseek.com").replace(/\/$/, "");
+  const model = settings.deepseekModel || process.env.DEEPSEEK_MODEL || "deepseek-chat";
+  const baseUrl = (settings.deepseekBaseUrl || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
   return { apiKey, model, baseUrl };
 }
 
-function getGeminiApiKey(): string {
+export function getGeminiConfig() {
   const db = getDb();
   const settings = (db.settings as any) || {};
-  return settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+  const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+  const baseUrl = (settings.geminiBaseUrl || process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com").replace(/\/$/, "");
+  return { apiKey, baseUrl };
+}
+
+function getGeminiApiKey(): string {
+  return getGeminiConfig().apiKey;
 }
 
 /**
@@ -117,12 +123,12 @@ export async function evaluateTypedEssayWithDeepSeek(
           feedback: 'Menunggu validasi guru'
         }))
       : [],
-    total_score: 0,
+    total_score: undefined,
     maximum_score: context.maxScore || 10,
     feedback: '',
     scoring_reason: '',
-    assessment_status: 'completed',
-    requires_teacher_review: false,
+    assessment_status: 'failed',
+    requires_teacher_review: true,
     evaluated_at: now,
     prompt_version: 'v3.0-typed-deepseek-only'
   };
@@ -131,6 +137,7 @@ export async function evaluateTypedEssayWithDeepSeek(
   if (!cleanText) {
     return {
       ...baseResult,
+      total_score: 0,
       feedback: 'Siswa tidak memberikan teks jawaban pada butir soal ini.',
       scoring_reason: 'Teks jawaban kosong.',
       assessment_status: 'completed',
@@ -143,7 +150,7 @@ export async function evaluateTypedEssayWithDeepSeek(
       ...baseResult,
       feedback: 'Jawaban tersimpan dengan aman di database. Layanan DeepSeek API belum terkonfigurasi untuk penilaian otomatis.',
       scoring_reason: 'Kunci API DeepSeek belum dikonfigurasi pada server.',
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -204,7 +211,7 @@ Berikan output JSON dengan format persis:
         ...baseResult,
         feedback: 'Jawaban tersimpan aman. Terjadi kendala saat menghubungi layanan DeepSeek.',
         scoring_reason: `DeepSeek API HTTP ${response.status}. Memerlukan review guru.`,
-        assessment_status: 'perlu_review_guru',
+        assessment_status: 'failed',
         requires_teacher_review: true
       };
     }
@@ -229,7 +236,7 @@ Berikan output JSON dengan format persis:
       total_score: safeTotal,
       feedback: parsed.feedback || 'Jawaban telah dinilai oleh DeepSeek berdasarkan rubrik.',
       scoring_reason: parsed.scoring_reason || 'Penilaian rubrik DeepSeek selesai.',
-      assessment_status: parsed.requires_teacher_review ? 'perlu_review_guru' : 'completed',
+      assessment_status: 'completed',
       requires_teacher_review: Boolean(parsed.requires_teacher_review)
     };
   } catch (err: any) {
@@ -238,7 +245,7 @@ Berikan output JSON dengan format persis:
       ...baseResult,
       feedback: 'Jawaban tersimpan aman di sistem. Penilaian otomatis ditunda untuk diperiksa guru.',
       scoring_reason: `Pengecualian jaringan/API: ${err.message}`,
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -259,7 +266,7 @@ export async function evaluateImageWithGeminiVision(
   mimeType: string = 'image/jpeg'
 ): Promise<StandardAIEvaluationResult> {
   const now = new Date().toISOString();
-  const apiKey = getGeminiApiKey();
+  const { apiKey, baseUrl } = getGeminiConfig();
 
   const baseResult: StandardAIEvaluationResult = {
     question_id: context.questionId,
@@ -275,12 +282,12 @@ export async function evaluateImageWithGeminiVision(
           feedback: 'Menunggu peninjauan langsung bukti foto oleh guru'
         }))
       : [],
-    total_score: 0,
+    total_score: undefined,
     maximum_score: context.maxScore || 10,
     feedback: '',
     scoring_reason: '',
-    assessment_status: 'completed',
-    requires_teacher_review: false,
+    assessment_status: 'failed',
+    requires_teacher_review: true,
     evaluated_at: now,
     prompt_version: 'v3.0-image-ocr-deepseek'
   };
@@ -291,7 +298,7 @@ export async function evaluateImageWithGeminiVision(
       ...baseResult,
       feedback: 'Tidak ada berkas gambar yang dilampirkan atau berkas tidak ditemukan di penyimpanan.',
       scoring_reason: 'Berkas bukti gambar kosong.',
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -301,7 +308,7 @@ export async function evaluateImageWithGeminiVision(
       ...baseResult,
       feedback: 'Foto lembar jawaban tersimpan dengan aman. Kunci Gemini API belum terpasang untuk OCR otomatis.',
       scoring_reason: 'Kunci API Gemini belum dikonfigurasi. Memerlukan peninjauan langsung foto asli oleh Guru.',
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -336,7 +343,7 @@ Berikan output JSON dengan format persis:
   for (const model of VALID_GEMINI_MODELS) {
     if (ocrSuccess) break;
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -387,7 +394,7 @@ Berikan output JSON dengan format persis:
       transcription_or_extraction: extractedText || '[Foto tulisan tangan buram atau tidak terbaca jelas]',
       feedback: 'Berkas foto lembar jawaban tersimpan aman di server. Tulisan tangan tidak cukup jelas untuk dibaca secara otomatis.',
       scoring_reason: unreadableReason || `Gagal mengekstrak teks dari foto via Gemini OCR (${lastErr || 'buram/tidak terbaca'}). Memerlukan evaluasi langsung oleh Guru.`,
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -415,7 +422,7 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
   mimeType: string = 'audio/webm'
 ): Promise<StandardAIEvaluationResult> {
   const now = new Date().toISOString();
-  const apiKey = getGeminiApiKey();
+  const { apiKey, baseUrl } = getGeminiConfig();
 
   const baseResult: StandardAIEvaluationResult = {
     question_id: context.questionId,
@@ -424,12 +431,12 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
     model_used: 'Gemini STT + DeepSeek',
     transcription_or_extraction: '',
     rubric_scores: [],
-    total_score: 0,
+    total_score: undefined,
     maximum_score: context.maxScore || 10,
     feedback: '',
     scoring_reason: '',
-    assessment_status: 'completed',
-    requires_teacher_review: false,
+    assessment_status: 'failed',
+    requires_teacher_review: true,
     evaluated_at: now,
     prompt_version: 'v3.0-audio-stt-deepseek'
   };
@@ -440,7 +447,7 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
       ...baseResult,
       feedback: 'Tidak ada berkas rekaman audio yang dilampirkan atau berkas tidak ditemukan di penyimpanan.',
       scoring_reason: 'Berkas audio kosong.',
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -450,7 +457,7 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
       ...baseResult,
       feedback: 'Berkas rekaman suara tersimpan aman di server. Kunci Gemini API belum terpasang untuk transkripsi otomatis.',
       scoring_reason: 'Kunci API Gemini belum dikonfigurasi. Rekaman asli tersimpan untuk didengarkan langsung oleh Guru.',
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }
@@ -486,7 +493,7 @@ Berikan output JSON dengan format:
   for (const model of VALID_GEMINI_MODELS) {
     if (sttSuccess) break;
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -530,7 +537,7 @@ Berikan output JSON dengan format:
       transcription_or_extraction: transcript || '[Rekaman audio tidak terdengar jelas atau bising]',
       feedback: 'Rekaman suara tersimpan aman di server. Suara tidak cukup jelas untuk ditranskripsikan secara otomatis.',
       scoring_reason: inaudibleReason || 'Rekaman audio bising atau tidak terdengar jelas. Memerlukan evaluasi langsung oleh Guru.',
-      assessment_status: 'perlu_review_guru',
+      assessment_status: 'failed',
       requires_teacher_review: true
     };
   }

@@ -705,17 +705,33 @@ async function runAllTests() {
       `Permintaan evaluasi AI submission diterima dengan baik (Status: ${subAiRes.status})`
     );
 
-    // 6.3 Verifikasi 4 Status Valid AI
+    // 6.3 Verifikasi Status Valid AI & Larangan Skor Palsu
     const checkSub = await request(`/api/submissions/${madiunSubId}`, {
       headers: { Authorization: `Bearer ${teacherToken}` }
     });
     const subRecord = checkSub.body.submission;
     const validAiStatuses = ['pending', 'processing', 'completed', 'failed'];
-    const currentStatus = subRecord?.aiEvaluationStatus || 'completed';
+    const currentStatus = subRecord?.aiGradingStatus;
     recordTest(
       validAiStatuses.includes(currentStatus),
       `Status AI submission berada dalam 4 status resmi valid ("${currentStatus}")`
     );
+
+    // Verifikasi bahwa kegagalan provider (kunci belum ada/dummy) tidak menghasilkan skor palsu
+    if (currentStatus === 'failed') {
+      recordTest(
+        subRecord.requiresTeacherReview === true && subRecord.isScoreFinal === false,
+        'Kegagalan DeepSeek/AI ditandai requiresTeacherReview=true dan isScoreFinal=false'
+      );
+      recordTest(
+        subRecord.status === 'perlu_pemeriksaan',
+        'Submission dengan kegagalan AI otomatis berstatus perlu_pemeriksaan'
+      );
+      recordTest(
+        subRecord.answers?.['q-chem-1']?.score === undefined,
+        'Kegagalan AI TIDAK menghasilkan nilai angka buatan/palsu pada jawaban esai'
+      );
+    }
 
     // 6.4 Validasi Skor oleh Guru (Manual Override & Approval)
     const updateScoreRes = await request(`/api/submissions/${madiunSubId}`, {
