@@ -6,7 +6,7 @@ export const INITIAL_SETTINGS: SystemSettings = {
   appName: 'Sistem Asesmen & Profil Kesiapan Kerja SMK',
   academicYear: '2024/2025 Genap',
   emailNotifications: true,
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-3.5-flash-lite',
   autoGradeEssays: true,
   aiReadinessAnalysis: true,
   speechToTextEnabled: true,
@@ -33,9 +33,9 @@ export const INITIAL_SETTINGS: SystemSettings = {
     },
     {
       id: 'prov-gemini-flash',
-      name: 'gemini-2.5-flash',
+      name: 'gemini-3.5-flash-lite',
       type: 'Gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash-lite',
       apiKey: 'AIzaSy****************7I0E',
       status: 'Active'
     }

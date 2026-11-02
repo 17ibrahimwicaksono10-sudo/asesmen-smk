@@ -17,6 +17,7 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { getDb, getEvidenceStorageDir } from "./db";
+import { getGeminiConfig } from "./aiConfig";
 
 export function resolveMediaBase64(mediaDataOrUrl?: string): string {
   if (!mediaDataOrUrl) return '';
@@ -73,9 +74,6 @@ export interface QuestionEvaluationContext {
   maxScore: number;
 }
 
-// Model fallback resmi Google Generative AI (Vision & Multimodal STT)
-const VALID_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"];
-
 function getDeepSeekConfig() {
   const db = getDb();
   const settings = (db.settings as any) || {};
@@ -86,9 +84,7 @@ function getDeepSeekConfig() {
 }
 
 function getGeminiApiKey(): string {
-  const db = getDb();
-  const settings = (db.settings as any) || {};
-  return settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+  return getGeminiConfig().apiKey;
 }
 
 /**
@@ -245,10 +241,10 @@ Berikan output JSON dengan format persis:
 }
 
 /**
- * 2. BUKTI FOTO / TULISAN TANGAN: GEMINI MULTIMODAL VISION
- * Mengirim gambar asli langsung ke Gemini Vision API untuk membaca tulisan tangan
- * SEKALIGUS menilai berdasarkan rubrik.
- * DEEPSEEK DILARANG DIPANGGIL DI SINI.
+ * 2. BUKTI FOTO / TULISAN TANGAN: GEMINI OCR -> DEEPSEEK PENILAIAN RUBRIK
+ * Tahap 1: Gemini Vision HANYA digunakan untuk membaca tulisan tangan dan rumus kimia (OCR).
+ * Tahap 2: Hasil ekstraksi teks tulisan tangan dinilai oleh DeepSeek berdasarkan rubrik soal.
+ * Gemini DILARANG menilai skor esai secara langsung.
  */
 export async function evaluateImageWithGeminiVision(
   context: QuestionEvaluationContext,
@@ -256,13 +252,14 @@ export async function evaluateImageWithGeminiVision(
   mimeType: string = 'image/jpeg'
 ): Promise<StandardAIEvaluationResult> {
   const now = new Date().toISOString();
-  const apiKey = getGeminiApiKey();
+  const geminiConfig = getGeminiConfig();
+  const apiKey = geminiConfig.apiKey;
 
   const baseResult: StandardAIEvaluationResult = {
     question_id: context.questionId,
     attempt_id: context.attemptId,
     input_type: 'image_upload',
-    model_used: 'Gemini Vision (Multimodal)',
+    model_used: 'Gemini Vision OCR + DeepSeek',
     transcription_or_extraction: '',
     rubric_scores: (context.rubricComponents && context.rubricComponents.length > 0)
       ? context.rubricComponents.map(r => ({
@@ -279,7 +276,7 @@ export async function evaluateImageWithGeminiVision(
     assessment_status: 'completed',
     requires_teacher_review: false,
     evaluated_at: now,
-    prompt_version: 'v3.0-gemini-vision-direct'
+    prompt_version: 'v3.5-ocr-deepseek-pipeline'
   };
 
   const resolvedMedia = resolveMediaBase64(rawImageData);
@@ -296,7 +293,7 @@ export async function evaluateImageWithGeminiVision(
   if (!apiKey) {
     return {
       ...baseResult,
-      feedback: 'Foto lembar jawaban tersimpan dengan aman. Kunci Gemini API belum terpasang untuk penilaian visi otomatis.',
+      feedback: 'Foto lembar jawaban tersimpan dengan aman. Kunci Gemini API belum terpasang untuk ekstraksi tulisan tangan otomatis.',
       scoring_reason: 'Kunci API Gemini belum dikonfigurasi. Memerlukan peninjauan langsung foto asli oleh Guru.',
       assessment_status: 'perlu_review_guru',
       requires_teacher_review: true
@@ -308,48 +305,33 @@ export async function evaluateImageWithGeminiVision(
     ? resolvedMedia.split(';')[0].replace('data:', '')
     : mimeType;
 
-  const prompt = `
-Anda adalah Evaluator Asesmen Vokasi SMK Kimia Industri dengan kemampuan Vision Multimodal.
-Tugas Anda adalah:
-1. Membaca dan mengekstrak tulisan tangan siswa dari gambar ini (termasuk rumus kimia, angka perhitungan, dan langkah kerja).
-2. Menilai jawaban tulisan tangan tersebut secara objektif berdasarkan Kunci Jawaban Acuan dan Komponen Rubrik berikut.
-DILARANG memberikan skor melebihi skor maksimal (${context.maxScore}).
+  // TAHAP 1: GEMINI HANYA UNTUK EKSTRAKSI TULISAN TANGAN (OCR)
+  const ocrPrompt = `
+Anda adalah sistem OCR Pembaca Tulisan Tangan dan Lembar Kerja Laboratorium Vokasi SMK Kimia Industri.
+Tugas Anda HANYA membaca dan mengekstrak seluruh teks tulisan tangan, rumus kimia, reaksi, angka perhitungan, dan langkah kerja siswa dari foto ini ke dalam bentuk teks terstruktur.
 
-=== INFORMASI SOAL & KUNCI ===
+DILARANG MEMBERIKAN NILAI ATAU EVALUASI SKOR.
+Hanya lakukan ekstraksi tulisan tangan dan periksa keterbacaan lembar jawaban.
+
+=== SOAL ACUAN ===
 Pertanyaan: ${context.questionText}
-Kunci Jawaban Acuan: ${context.answerKey || 'Sesuai SOP industri kimia'}
-Pedoman Rubrik: ${context.rubricGuide || 'Penilaian ketepatan prosedur, perhitungan kimia, dan kepatuhan K3'}
-Komponen Rubrik: ${JSON.stringify(context.rubricComponents || [], null, 2)}
-Skor Maksimal: ${context.maxScore}
 
-=== ATURAN INTEGRITAS & KETERBACAAN ===
-- Jika foto tulisan tangan buram, gelap, terpotong, atau tidak terbaca: Nyatakan secara jujur pada "transcription_or_extraction", set "assessment_status": "perlu_review_guru", dan "requires_teacher_review": true.
-- DILARANG mengarang isi jawaban fiktif jika tulisan tangan tidak terbaca.
-- Jika terbaca jelas, berikan transkripsi teks lengkap dan hitung skor per indikator rubrik.
-
-Berikan output JSON dengan skema persis:
+Berikan output JSON dengan format:
 {
-  "transcription_or_extraction": "Teks lengkap tulisan tangan yang terbaca...",
-  "total_score": number,
-  "scoring_reason": "Alasan penilaian detail berdasarkan tulisan yang terbaca...",
-  "feedback": "Umpan balik untuk siswa...",
-  "rubric_scores": [
-    {
-      "indicator": "Nama indikator rubrik",
-      "score": number,
-      "maxScore": number,
-      "feedback": "Keterangan capaian"
-    }
-  ],
+  "extracted_text": "Teks lengkap tulisan tangan siswa yang terbaca...",
   "is_readable": boolean,
-  "requires_teacher_review": boolean
+  "unreadable_reason": "Alasan jika buram/gelap atau null"
 }`;
 
-  let success = false;
+  let extractedText = '';
+  let ocrSuccess = false;
+  let ocrModelUsed = '';
+  let isUnreadable = false;
+  let unreadableReason = '';
   let lastErr = '';
 
-  for (const model of VALID_GEMINI_MODELS) {
-    if (success) break;
+  for (const model of geminiConfig.candidateModels) {
+    if (ocrSuccess) break;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const res = await fetch(url, {
@@ -361,13 +343,13 @@ Berikan output JSON dengan skema persis:
               role: 'user',
               parts: [
                 { inlineData: { mimeType: cleanMime, data: base64Clean } },
-                { text: prompt }
+                { text: ocrPrompt }
               ]
             }
           ],
           generationConfig: {
             responseMimeType: 'application/json',
-            temperature: 0.2
+            temperature: 0.1
           }
         })
       });
@@ -383,45 +365,39 @@ Berikan output JSON dengan skema persis:
       const responseText = json.candidates?.[0]?.content?.parts?.[0]?.text;
       if (responseText) {
         const parsed = JSON.parse(responseText);
-        const extractedText = (parsed.transcription_or_extraction || '').trim();
-        const isReadable = parsed.is_readable !== false && extractedText.length > 0;
-        const safeTotal = Math.min(context.maxScore, Math.max(0, Number(parsed.total_score) || 0));
-
-        const rubricScores: RubricScoreItem[] = Array.isArray(parsed.rubric_scores)
-          ? parsed.rubric_scores.map((r: any) => ({
-              indicator: String(r.indicator || 'Indikator'),
-              score: Math.max(0, Number(r.score) || 0),
-              maxScore: Math.max(1, Number(r.maxScore) || 1),
-              feedback: r.feedback ? String(r.feedback) : undefined
-            }))
-          : [];
-
-        const needsReview = !isReadable || Boolean(parsed.requires_teacher_review);
-
-        return {
-          ...baseResult,
-          model_used: `Gemini Vision (${model})`,
-          transcription_or_extraction: extractedText || (isReadable ? '' : '[Tulisan tangan tidak terbaca jelas oleh AI]'),
-          rubric_scores: rubricScores,
-          total_score: safeTotal,
-          feedback: parsed.feedback || (isReadable ? 'Foto tulisan tangan telah dinilai.' : 'Foto tulisan tangan memerlukan validasi guru.'),
-          scoring_reason: parsed.scoring_reason || (isReadable ? 'Penilaian visi Gemini selesai.' : 'Tulisan tangan buram atau kurang jelas.'),
-          assessment_status: needsReview ? 'perlu_review_guru' : 'completed',
-          requires_teacher_review: needsReview
-        };
+        extractedText = (parsed.extracted_text || '').trim();
+        isUnreadable = parsed.is_readable === false || !extractedText;
+        unreadableReason = parsed.unreadable_reason || '';
+        ocrModelUsed = model;
+        ocrSuccess = true;
       }
     } catch (modelErr: any) {
       lastErr = `${model} exception: ${modelErr.message}`;
     }
   }
 
-  // Jika semua model Gemini gagal dihubungi
+  // Jika OCR gagal (karena lokasi, auth, kuota, atau foto buram)
+  if (!ocrSuccess || isUnreadable || !extractedText) {
+    return {
+      ...baseResult,
+      model_used: ocrModelUsed ? `Gemini OCR (${ocrModelUsed})` : `Gemini OCR (${geminiConfig.primaryModel})`,
+      transcription_or_extraction: extractedText || '[Foto tulisan tangan tidak terbaca jelas atau gagal diproses]',
+      feedback: 'Foto lembar jawaban tersimpan aman di server. Tulisan tangan tidak cukup jelas atau layanan visi AI mengalami kendala.',
+      scoring_reason: unreadableReason || `Gagal mengekstrak tulisan tangan via Gemini Vision (${lastErr || 'Foto tidak terbaca'}). Memerlukan pemeriksaan langsung oleh Guru.`,
+      assessment_status: 'perlu_review_guru',
+      requires_teacher_review: true
+    };
+  }
+
+  // TAHAP 2: DEEPSEEK MENILAI TEKS HASIL EKSTRAKSI TULISAN TANGAN SESUAI RUBRIK
+  const deepseekResult = await evaluateTypedEssayWithDeepSeek(context, extractedText);
+
   return {
-    ...baseResult,
-    feedback: 'Berkas foto tulisan tangan tersimpan aman di server. Layanan visi AI mengalami kendala.',
-    scoring_reason: `Gagal memproses gambar melalui Gemini Vision (${lastErr}). Foto asli tersimpan untuk diperiksa langsung oleh Guru.`,
-    assessment_status: 'perlu_review_guru',
-    requires_teacher_review: true
+    ...deepseekResult,
+    input_type: 'image_upload',
+    model_used: `Gemini OCR (${ocrModelUsed}) + ${deepseekResult.model_used}`,
+    transcription_or_extraction: extractedText,
+    scoring_reason: `Hasil ekstraksi OCR Gemini (${ocrModelUsed}) dinilai oleh DeepSeek berdasarkan rubrik: ${deepseekResult.scoring_reason}`
   };
 }
 
@@ -436,7 +412,8 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
   mimeType: string = 'audio/webm'
 ): Promise<StandardAIEvaluationResult> {
   const now = new Date().toISOString();
-  const apiKey = getGeminiApiKey();
+  const geminiConfig = getGeminiConfig();
+  const apiKey = geminiConfig.apiKey;
 
   const baseResult: StandardAIEvaluationResult = {
     question_id: context.questionId,
@@ -452,7 +429,7 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
     assessment_status: 'completed',
     requires_teacher_review: false,
     evaluated_at: now,
-    prompt_version: 'v3.0-audio-stt-deepseek'
+    prompt_version: 'v3.5-audio-stt-deepseek'
   };
 
   const resolvedMedia = resolveMediaBase64(rawAudioData);
@@ -503,8 +480,9 @@ Berikan output JSON dengan format:
   let sttModelUsed = '';
   let isAudioInaudible = false;
   let inaudibleReason = '';
+  let lastErr = '';
 
-  for (const model of VALID_GEMINI_MODELS) {
+  for (const model of geminiConfig.candidateModels) {
     if (sttSuccess) break;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -528,7 +506,12 @@ Berikan output JSON dengan format:
         })
       });
 
-      if (!res.ok) continue;
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const errMsg = (errJson as any)?.error?.message || res.statusText;
+        lastErr = `${model} HTTP ${res.status}: ${errMsg}`;
+        continue;
+      }
 
       const json = await res.json() as any;
       const responseText = json.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -540,17 +523,19 @@ Berikan output JSON dengan format:
         sttModelUsed = model;
         sttSuccess = true;
       }
-    } catch {}
+    } catch (modelErr: any) {
+      lastErr = `${model} exception: ${modelErr.message}`;
+    }
   }
 
   // Jika STT gagal atau rekaman tidak bersuara/rusak
   if (!sttSuccess || isAudioInaudible || !transcript) {
     return {
       ...baseResult,
-      model_used: sttModelUsed ? `Gemini STT (${sttModelUsed})` : 'Gemini STT',
+      model_used: sttModelUsed ? `Gemini STT (${sttModelUsed})` : `Gemini STT (${geminiConfig.primaryModel})`,
       transcription_or_extraction: transcript || '[Rekaman audio tidak terdengar jelas atau bising]',
       feedback: 'Rekaman suara tersimpan aman di server. Suara tidak cukup jelas untuk ditranskripsikan secara otomatis.',
-      scoring_reason: inaudibleReason || 'Rekaman audio bising atau tidak terdengar jelas. Memerlukan evaluasi langsung oleh Guru.',
+      scoring_reason: inaudibleReason || `Rekaman audio bising atau gagal diproses via Gemini STT (${lastErr || 'Audio tidak jelas'}). Memerlukan evaluasi langsung oleh Guru.`,
       assessment_status: 'perlu_review_guru',
       requires_teacher_review: true
     };
@@ -562,9 +547,9 @@ Berikan output JSON dengan format:
   return {
     ...deepseekResult,
     input_type: 'microphone_audio',
-    model_used: `Gemini STT (${sttModelUsed}) → DeepSeek`,
+    model_used: `Gemini STT (${sttModelUsed}) + ${deepseekResult.model_used}`,
     transcription_or_extraction: transcript,
-    prompt_version: 'v3.0-audio-stt-deepseek'
+    scoring_reason: `Hasil transkripsi audio Gemini (${sttModelUsed}) dinilai oleh DeepSeek berdasarkan rubrik: ${deepseekResult.scoring_reason}`
   };
 }
 
