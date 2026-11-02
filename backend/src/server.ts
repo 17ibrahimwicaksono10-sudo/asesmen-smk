@@ -888,6 +888,17 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
     };
   });
 
+  // Sanitasi arsip di bootstrap: hanya sertakan metadata tanpa payload besar agar bootstrap tetap ringan (< 100 KB)
+  const safeArchives = (db.archives || []).map((a: any) => ({
+    id: a.id,
+    type: a.type,
+    title: a.title,
+    schoolId: a.schoolId,
+    createdAt: a.createdAt,
+    archivedAt: a.archivedAt,
+    reason: a.reason,
+  }));
+
   res.json({
     success: true,
     data: {
@@ -898,7 +909,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       packages: safePackages,
       exams: safeExams,
       submissions: safeSubmissions,
-      archives: db.archives || [],
+      archives: safeArchives,
       settings: safeSettings,
       portfolios: db.portfolios || [],
       lastUpdated: db.lastUpdated,
