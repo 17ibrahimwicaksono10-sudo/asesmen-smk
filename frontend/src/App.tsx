@@ -274,121 +274,139 @@ export default function App() {
 
   const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const inFlightPromiseRef = React.useRef<Promise<void> | null>(null);
 
   // Load persistent data from Backend Database
-  const loadBackendData = React.useCallback(async () => {
-    setIsInitialLoading(true);
-    setLoadError(null);
+  const loadBackendData = React.useCallback(async (opts?: { skipTokenRestore?: boolean; force?: boolean }) => {
+    // Cegah race condition dan penumpukan request bootstrap concurrent
+    if (inFlightPromiseRef.current && !opts?.force) {
+      return inFlightPromiseRef.current;
+    }
 
-    // 1. Verifikasi dan pulihkan auth token jika tersimpan di sesi browser
-    try {
-      const storedToken = getAuthToken();
-      if (storedToken) {
-        const tokenRes = await fetch('/api/auth/restore-token', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${storedToken}`
-          },
-          body: JSON.stringify({ token: storedToken })
-        });
-        const tokenJson = await tokenRes.json().catch(() => ({}));
-        if (tokenRes.ok && tokenJson.token) {
-          setAuthToken(tokenJson.token);
-          if (tokenJson.user) {
-            setCurrentUser(tokenJson.user);
+    const task = (async () => {
+      setIsInitialLoading(true);
+      setLoadError(null);
+
+      // 1. Verifikasi dan pulihkan auth token jika tersimpan di sesi browser
+      if (!opts?.skipTokenRestore) {
+        try {
+          const storedToken = getAuthToken();
+          if (storedToken) {
+            const tokenRes = await fetch('/api/auth/restore-token', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${storedToken}`
+              },
+              body: JSON.stringify({ token: storedToken })
+            });
+            const tokenJson = await tokenRes.json().catch(() => ({}));
+            if (tokenRes.ok && tokenJson.token) {
+              setAuthToken(tokenJson.token);
+              if (tokenJson.user) {
+                setCurrentUser(tokenJson.user);
+                try {
+                  localStorage.setItem('voc_user', JSON.stringify(tokenJson.user));
+                } catch {}
+              }
+              console.log('[Frontend] Sesi autentikasi berhasil dipulihkan secara aman.');
+            } else {
+              // Sesi kedaluwarsa atau token tidak valid: hapus dari browser
+              setAuthToken(null);
+              setCurrentUser(null);
+              try {
+                localStorage.removeItem('voc_token');
+                localStorage.removeItem('voc_user');
+              } catch {}
+              console.warn('[Frontend] Sesi tersimpan tidak valid atau telah kedaluwarsa.');
+            }
+          }
+        } catch (tokenErr) {
+          console.warn('[Frontend] Gagal memeriksa pemulihan auth token:', tokenErr);
+        }
+      }
+
+      // 2. Ambil data bootstrap dari backend
+      try {
+        const json = await apiGet('/api/bootstrap');
+        if (json.success && json.data) {
+          const { users, schools: s, classes: c, teachers: t, packages: p, exams: e, submissions: sub, archives: a, settings: set, portfolios: port } = json.data;
+          if (Array.isArray(s)) setSchools(s);
+          if (Array.isArray(c)) setClasses(c);
+          if (Array.isArray(t)) {
+            setTeachers(t);
             try {
-              localStorage.setItem('voc_user', JSON.stringify(tokenJson.user));
+              localStorage.setItem('voc_teachers', JSON.stringify(t));
             } catch {}
           }
-          console.log('[Frontend] Sesi autentikasi berhasil dipulihkan secara aman.');
-        } else {
-          // Sesi kedaluwarsa atau token tidak valid: hapus dari browser
-          setAuthToken(null);
-          setCurrentUser(null);
-          try {
-            localStorage.removeItem('voc_token');
-            localStorage.removeItem('voc_user');
-          } catch {}
-          console.warn('[Frontend] Sesi tersimpan tidak valid atau telah kedaluwarsa.');
-        }
-      }
-    } catch (tokenErr) {
-      console.warn('[Frontend] Gagal memeriksa pemulihan auth token:', tokenErr);
-    }
-
-    // 2. Ambil data bootstrap dari backend
-    try {
-      const json = await apiGet('/api/bootstrap');
-      if (json.success && json.data) {
-        const { users, schools: s, classes: c, teachers: t, packages: p, exams: e, submissions: sub, archives: a, settings: set, portfolios: port } = json.data;
-        if (Array.isArray(s)) setSchools(s);
-        if (Array.isArray(c)) setClasses(c);
-        if (Array.isArray(t)) {
-          setTeachers(t);
-          try {
-            localStorage.setItem('voc_teachers', JSON.stringify(t));
-          } catch {}
-        }
-        if (Array.isArray(p)) {
-          setPackages(p);
-          try {
-            localStorage.setItem('voc_packages', JSON.stringify(p));
-          } catch {}
-        }
-        if (Array.isArray(e)) {
-          setExams(e);
-          try {
-            localStorage.setItem('voc_exams', JSON.stringify(e));
-          } catch {}
-        }
-        if (Array.isArray(sub)) setSubmissions(sub);
-        if (Array.isArray(a)) setArchives(a);
-        if (set) setSettings(set);
-        if (Array.isArray(port) && port.length > 0) {
-          setPortfolios(port);
-          try {
-            localStorage.setItem('voc_portfolios', JSON.stringify(port));
-          } catch {}
-        }
-        if (Array.isArray(users) || Array.isArray(t)) {
-          setRegisteredUsers(() => {
-            const map = new Map<string, User>();
-            if (Array.isArray(users)) {
-              users.forEach((u: User) => map.set(u.email.toLowerCase(), u));
-            }
-            if (Array.isArray(t)) {
-              t.forEach((item: Teacher) => {
-                map.set(item.email.toLowerCase(), {
-                  id: item.id,
-                  name: item.name,
-                  email: item.email,
-                  role: 'guru',
-                  identityNo: item.identityNo,
-                  schoolId: item.schoolId,
-                  schoolName: item.schoolName,
-                  phone: item.phone,
-                  password: item.password || '123456'
-                });
-              });
-            }
-            const merged = Array.from(map.values());
+          if (Array.isArray(p)) {
+            setPackages(p);
             try {
-              localStorage.setItem('voc_registered_users', JSON.stringify(merged));
+              localStorage.setItem('voc_packages', JSON.stringify(p));
             } catch {}
-            return merged;
-          });
+          }
+          if (Array.isArray(e)) {
+            setExams(e);
+            try {
+              localStorage.setItem('voc_exams', JSON.stringify(e));
+            } catch {}
+          }
+          if (Array.isArray(sub)) setSubmissions(sub);
+          if (Array.isArray(a)) setArchives(a);
+          if (set) setSettings(set);
+          if (Array.isArray(port) && port.length > 0) {
+            setPortfolios(port);
+            try {
+              localStorage.setItem('voc_portfolios', JSON.stringify(port));
+            } catch {}
+          }
+          if (Array.isArray(users) || Array.isArray(t)) {
+            setRegisteredUsers(() => {
+              const map = new Map<string, User>();
+              if (Array.isArray(users)) {
+                users.forEach((u: User) => {
+                  if (u && u.email) map.set(u.email.toLowerCase(), u);
+                });
+              }
+              if (Array.isArray(t)) {
+                t.forEach((item: Teacher) => {
+                  if (item && item.email) {
+                    map.set(item.email.toLowerCase(), {
+                      id: item.id,
+                      name: item.name,
+                      email: item.email,
+                      role: 'guru',
+                      identityNo: item.identityNo,
+                      schoolId: item.schoolId,
+                      schoolName: item.schoolName,
+                      phone: item.phone,
+                      password: item.password || '123456'
+                    });
+                  }
+                });
+              }
+              const merged = Array.from(map.values());
+              try {
+                localStorage.setItem('voc_registered_users', JSON.stringify(merged));
+              } catch {}
+              return merged;
+            });
+          }
+          console.log('[Frontend] Data berhasil disinkronkan dari database backend.');
+        } else {
+          setLoadError(json.error || 'Gagal memuat data dari database.');
         }
-        console.log('[Frontend] Data berhasil disinkronkan dari database backend.');
-      } else {
-        setLoadError(json.error || 'Gagal memuat data dari database.');
+      } catch (err: any) {
+        console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
+        setLoadError(err.message || 'Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
+      } finally {
+        setIsInitialLoading(false);
+        inFlightPromiseRef.current = null;
       }
-    } catch (err: any) {
-      console.warn('[Frontend] Gagal terhubung ke backend bootstrap:', err);
-      setLoadError('Gagal terhubung ke backend server. Periksa koneksi jaringan Anda.');
-    } finally {
-      setIsInitialLoading(false);
-    }
+    })();
+
+    inFlightPromiseRef.current = task;
+    return task;
   }, []);
 
   useEffect(() => {
@@ -402,7 +420,8 @@ export default function App() {
       localStorage.setItem('voc_user', JSON.stringify(user));
     } catch {}
     setActiveTab('overview');
-    await loadBackendData();
+    // Token sudah disimpan oleh AuthModal, lewati restore-token dan jalankan bootstrap baru
+    await loadBackendData({ skipTokenRestore: true, force: true });
   };
 
   const handleLogout = () => {
@@ -949,8 +968,8 @@ export default function App() {
     );
   }
 
-  // Load error screen jika data sama sekali kosong dan koneksi terputus
-  if (loadError && !schools.length && !exams.length && !currentUser) {
+  // Load error screen jika data utama kosong dan koneksi terputus
+  if (loadError && !schools.length && !exams.length) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-slate-100 font-sans">
         <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
@@ -961,12 +980,20 @@ export default function App() {
             <h2 className="text-base font-bold text-white">Gagal Menghubungkan ke Server</h2>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">{loadError}</p>
           </div>
-          <button
-            onClick={() => window.location.reload()}
-            className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition cursor-pointer shadow-lg shadow-blue-600/30"
-          >
-            Muat Ulang Halaman
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => loadBackendData({ force: true })}
+              className="flex-1 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition cursor-pointer shadow-lg shadow-blue-600/30"
+            >
+              Coba Sinkronkan Ulang
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition cursor-pointer border border-slate-700"
+            >
+              Muat Ulang Halaman
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1034,6 +1061,21 @@ export default function App() {
 
         {/* Content View Container */}
         <main className="flex-1 p-3.5 sm:p-6 lg:p-8 overflow-y-auto max-w-7xl mx-auto w-full pb-24 md:pb-8">
+          {loadError && (
+            <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex flex-wrap items-center justify-between gap-2 shadow-sm">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>Peringatan Sinkronisasi: {loadError}</span>
+              </div>
+              <button
+                onClick={() => loadBackendData({ force: true })}
+                className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[11px] transition cursor-pointer"
+              >
+                Sinkronkan Ulang
+              </button>
+            </div>
+          )}
+
           {/* ADMIN ROLE VIEWS */}
           {currentUser.role === 'admin' && (
             <>

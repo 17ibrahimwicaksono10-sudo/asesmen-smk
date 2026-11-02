@@ -53,8 +53,131 @@ if (!fs.existsSync(EVIDENCE_STORAGE_DIR)) {
   fs.mkdirSync(EVIDENCE_STORAGE_DIR, { recursive: true });
 }
 
+// Sinkronisasi data awal satu kali saat server start (Bukan di setiap request HTTP)
+export function ensureConsistentInitialData(): void {
+  const db = getDb();
+  let changed = false;
+
+  // Ensure all teachers in db.teachers are also in db.users so they can login immediately
+  for (const t of (db.teachers || [])) {
+    if (!db.users.some(u => u.email.toLowerCase() === t.email.toLowerCase())) {
+      db.users.push({
+        id: t.id,
+        name: t.name,
+        email: t.email,
+        role: "guru",
+        identityNo: t.identityNo,
+        schoolName: t.schoolName,
+        phone: t.phone,
+        password: t.password || "123456",
+      });
+      changed = true;
+    }
+  }
+
+  // Pastikan paket pkg-full-24 dan pkg-employability-18 selalu tersinkronisasi dengan instrumen mutakhir
+  if (Array.isArray(db.packages)) {
+    const fullPkg = db.packages.find(p => p.id === 'pkg-full-24');
+    if (fullPkg && fullPkg.questions !== REVISED_QUESTIONS_24) {
+      fullPkg.questions = REVISED_QUESTIONS_24;
+      fullPkg.totalQuestions = 24;
+      changed = true;
+    }
+
+    const empPkg = db.packages.find(p => p.id === 'pkg-employability-18');
+    if (empPkg) {
+      if (empPkg.questions !== NON_TEST_QUESTIONS_18 || empPkg.title !== DEFAULT_EMPLOYABILITY_PACKAGE.title) {
+        empPkg.questions = NON_TEST_QUESTIONS_18;
+        empPkg.totalQuestions = 18;
+        empPkg.title = DEFAULT_EMPLOYABILITY_PACKAGE.title;
+        empPkg.description = DEFAULT_EMPLOYABILITY_PACKAGE.description;
+        changed = true;
+      }
+    } else {
+      db.packages.unshift(DEFAULT_EMPLOYABILITY_PACKAGE);
+      changed = true;
+    }
+  }
+
+  // Pastikan submission employability diselaraskan dengan penskoran rubrik 18 butir (1-5)
+  if (Array.isArray(db.submissions)) {
+    db.submissions.forEach(sub => {
+      const examObj = db.exams?.find(e => e.id === sub.examId);
+      const isEmp = sub.examId === 'ex-1791791348414'
+        || examObj?.packageId === 'pkg-employability-18'
+        || examObj?.category === 'employability'
+        || sub.examTitle?.toLowerCase().includes('employa')
+        || sub.examTitle?.toLowerCase().includes('non-tes')
+        || Object.keys(sub.answers || {}).some(k => k.startsWith('q-nt-') || k.startsWith('nt-'));
+      if (isEmp && sub.answers) {
+        const empRes = calculateEmployabilityScore(sub.answers, NON_TEST_QUESTIONS_18);
+        if (sub.totalScore !== empRes.finalPercentage || sub.employabilityScore !== empRes.finalPercentage || Object.keys(sub.answers)[0] !== 'nt-1') {
+          sub.totalScore = empRes.finalPercentage;
+          sub.employabilityScore = empRes.finalPercentage;
+          sub.technicalScore = 0;
+          sub.aiEvaluation = `Skor Total Non-Tes Employability: ${empRes.totalRawScore}/90 (${empRes.finalPercentage}% - Kategori ${empRes.category}). ${empRes.interpretation}`;
+          sub.teacherFollowUp = `Pemeriksaan instrumen non-tes employability telah selesai sesuai rubrik 18 butir (skor 1-5 per respons). Kategori: ${empRes.category}.`;
+          
+          // Re-order answers strictly sequentially 1 to 18
+          const orderedAnswers: Record<string, any> = {};
+          NON_TEST_QUESTIONS_18.forEach(q => {
+            const rawPick = (sub.answers[q.id]?.selectedOption || '').toString().trim();
+            if (!rawPick) {
+              orderedAnswers[q.id] = {
+                questionId: q.id,
+                score: 0,
+                maxScore: 5,
+                ...(sub.answers[q.id] || {})
+              };
+              orderedAnswers[q.id].score = 0;
+              orderedAnswers[q.id].maxScore = 5;
+              return;
+            }
+            const studentPick = rawPick.toUpperCase();
+            let letter = '';
+            if (['A', 'B', 'C', 'D', 'E'].includes(studentPick)) {
+              letter = studentPick;
+            } else {
+              const match = studentPick.match(/^([A-E])\b/);
+              if (match) letter = match[1];
+              else if (studentPick.startsWith('A')) letter = 'A';
+              else if (studentPick.startsWith('B')) letter = 'B';
+              else if (studentPick.startsWith('C')) letter = 'C';
+              else if (studentPick.startsWith('D')) letter = 'D';
+              else if (studentPick.startsWith('E')) letter = 'E';
+            }
+            const earned = letter ? (q.scoringMap[letter] || 0) : 0;
+            orderedAnswers[q.id] = {
+              ...(sub.answers[q.id] || {}),
+              questionId: q.id,
+              score: earned,
+              maxScore: 5
+            };
+          });
+
+          // Keep any additional keys
+          Object.keys(sub.answers).forEach(k => {
+            if (!orderedAnswers[k]) orderedAnswers[k] = sub.answers[k];
+          });
+
+          sub.answers = orderedAnswers;
+          sub.originalAIScoreTotal = empRes.totalRawScore;
+
+          changed = true;
+        }
+      }
+    });
+  }
+
+  if (changed) {
+    saveDb();
+    console.log('[Startup] Sinkronisasi konsistensi awal database berhasil disimpan.');
+  }
+}
+
 // Inisialisasi Database JSON saat server start
 initDb();
+ensureConsistentInitialData();
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 5000;
@@ -375,118 +498,6 @@ app.get("/api/dashboard/summary", optionalAuth, (req: AuthenticatedRequest, res:
 app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
 
-  // Ensure all teachers in db.teachers are also in db.users so they can login immediately
-  let changed = false;
-  for (const t of db.teachers) {
-    if (!db.users.some(u => u.email.toLowerCase() === t.email.toLowerCase())) {
-      db.users.push({
-        id: t.id,
-        name: t.name,
-        email: t.email,
-        role: "guru",
-        identityNo: t.identityNo,
-        schoolName: t.schoolName,
-        phone: t.phone,
-        password: t.password || "123456",
-      });
-      changed = true;
-    }
-  }
-
-  // Pastikan paket pkg-full-24 dan pkg-employability-18 selalu tersinkronisasi dengan instrumen mutakhir
-  if (Array.isArray(db.packages)) {
-    const fullPkg = db.packages.find(p => p.id === 'pkg-full-24');
-    if (fullPkg) {
-      fullPkg.questions = REVISED_QUESTIONS_24;
-      fullPkg.totalQuestions = 24;
-      changed = true;
-    }
-
-    const empPkg = db.packages.find(p => p.id === 'pkg-employability-18');
-    if (empPkg) {
-      empPkg.questions = NON_TEST_QUESTIONS_18;
-      empPkg.totalQuestions = 18;
-      empPkg.title = DEFAULT_EMPLOYABILITY_PACKAGE.title;
-      empPkg.description = DEFAULT_EMPLOYABILITY_PACKAGE.description;
-      changed = true;
-    } else {
-      db.packages.unshift(DEFAULT_EMPLOYABILITY_PACKAGE);
-      changed = true;
-    }
-  }
-
-  // Pastikan submission employability diselaraskan dengan penskoran rubrik 18 butir (1-5)
-  if (Array.isArray(db.submissions)) {
-    db.submissions.forEach(sub => {
-      const examObj = db.exams?.find(e => e.id === sub.examId);
-      const isEmp = sub.examId === 'ex-1791791348414'
-        || examObj?.packageId === 'pkg-employability-18'
-        || examObj?.category === 'employability'
-        || sub.examTitle?.toLowerCase().includes('employa')
-        || sub.examTitle?.toLowerCase().includes('non-tes')
-        || Object.keys(sub.answers || {}).some(k => k.startsWith('q-nt-') || k.startsWith('nt-'));
-      if (isEmp && sub.answers) {
-        const empRes = calculateEmployabilityScore(sub.answers, NON_TEST_QUESTIONS_18);
-        if (sub.totalScore !== empRes.finalPercentage || sub.employabilityScore !== empRes.finalPercentage || Object.keys(sub.answers)[0] !== 'nt-1') {
-          sub.totalScore = empRes.finalPercentage;
-          sub.employabilityScore = empRes.finalPercentage;
-          sub.technicalScore = 0;
-          sub.aiEvaluation = `Skor Total Non-Tes Employability: ${empRes.totalRawScore}/90 (${empRes.finalPercentage}% - Kategori ${empRes.category}). ${empRes.interpretation}`;
-          sub.teacherFollowUp = `Pemeriksaan instrumen non-tes employability telah selesai sesuai rubrik 18 butir (skor 1-5 per respons). Kategori: ${empRes.category}.`;
-          
-          // Re-order answers strictly sequentially 1 to 18
-          const orderedAnswers: Record<string, any> = {};
-          NON_TEST_QUESTIONS_18.forEach(q => {
-            const rawPick = (sub.answers[q.id]?.selectedOption || '').toString().trim();
-            if (!rawPick) {
-              orderedAnswers[q.id] = {
-                questionId: q.id,
-                score: 0,
-                maxScore: 5,
-                ...(sub.answers[q.id] || {})
-              };
-              orderedAnswers[q.id].score = 0;
-              orderedAnswers[q.id].maxScore = 5;
-              return;
-            }
-            const studentPick = rawPick.toUpperCase();
-            let letter = '';
-            if (['A', 'B', 'C', 'D', 'E'].includes(studentPick)) {
-              letter = studentPick;
-            } else {
-              const match = studentPick.match(/^([A-E])\b/);
-              if (match) letter = match[1];
-              else if (studentPick.startsWith('A')) letter = 'A';
-              else if (studentPick.startsWith('B')) letter = 'B';
-              else if (studentPick.startsWith('C')) letter = 'C';
-              else if (studentPick.startsWith('D')) letter = 'D';
-              else if (studentPick.startsWith('E')) letter = 'E';
-            }
-            const earned = letter ? (q.scoringMap[letter] || 0) : 0;
-            orderedAnswers[q.id] = {
-              ...(sub.answers[q.id] || {}),
-              questionId: q.id,
-              score: earned,
-              maxScore: 5
-            };
-          });
-
-          // Keep any additional keys
-          Object.keys(sub.answers).forEach(k => {
-            if (!orderedAnswers[k]) orderedAnswers[k] = sub.answers[k];
-          });
-
-          sub.answers = orderedAnswers;
-          sub.originalAIScoreTotal = empRes.totalRawScore;
-
-          changed = true;
-        }
-      }
-    });
-  }
-
-  if (changed) saveDb();
-
   // Sanitasi data: Hapus password guru
   const safeTeachers = (db.teachers || []).map(t => {
     const { password, ...safe } = t;
@@ -507,14 +518,15 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
     questions: isTeacherOrAdmin ? p.questions : sanitizeQuestionsForStudent(p.questions || [])
   }));
 
-  // Sanitasi daftar ujian (ringkas): Sensor questionSnapshot untuk non-guru/admin
+  // Sanitasi daftar ujian (ringkas): questionSnapshot tidak dikirim di bootstrap agar hemat bandwidth (< 50 KB).
+  // Soal ujian diambil sesuai hak akses melalui GET /api/exams/:id/questions saat ujian dimulai.
   const safeExams = (db.exams || []).map(e => ({
     ...e,
-    questionSnapshot: isTeacherOrAdmin ? e.questionSnapshot : (e.questionSnapshot ? sanitizeQuestionsForStudent(e.questionSnapshot) : undefined)
+    questionSnapshot: undefined
   }));
 
   // Sanitasi submission: TIDAK MENGIRIMKAN Base64 dan jawaban berat di bootstrap
-  // Sanitasi submission: Isolasi data berdasarkan hak akses (Anti-Bypass & Perlindungan Data Siswa)
+  // Isolasi data berdasarkan hak akses (Anti-Bypass & Perlindungan Data Siswa)
   let rawSubmissions = db.submissions || [];
   if (!req.user) {
     // Pengguna belum login: JANGAN bocorkan data submission siswa ke publik
@@ -578,10 +590,14 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       aiGradingStatus: s.aiGradingStatus,
       aiGradedAt: s.aiGradedAt,
       requiresTeacherReview: s.requiresTeacherReview,
+      hasPendingComponents: s.hasPendingComponents,
+      isScoreFinal: s.isScoreFinal,
       aiEvaluation: s.aiEvaluation,
       teacherFollowUp: s.teacherFollowUp,
       evidences: safeEvidences,
-      answers: isTeacherOrAdmin || (req.user?.role === 'siswa' && s.studentId === req.user?.userId) ? s.answers : undefined,
+      evidenceCount: safeEvidences.length,
+      // Jawaban rincian: Siswa hanya menerima miliknya sendiri. Guru/Admin mengambil detail per-submission on-demand via GET /api/submissions/:id
+      answers: req.user?.role === 'siswa' && s.studentId === req.user?.userId ? s.answers : undefined,
     };
   });
 

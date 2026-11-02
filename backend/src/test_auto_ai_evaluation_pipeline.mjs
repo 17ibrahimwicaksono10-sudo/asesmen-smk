@@ -156,12 +156,19 @@ async function runAutoAIPipelineTests() {
     });
 
     assert.strictEqual(res.status, 200);
-    const sub = res.body.data.submissions.find(s => s.id === typedSubmissionId);
-    assert(sub, 'Submission ketikan harus ditemukan di daftar guru');
+    const subSummary = res.body.data.submissions.find(s => s.id === typedSubmissionId);
+    assert(subSummary, 'Submission ketikan harus ditemukan di daftar guru');
     
     // Status AI harus salah satu dari: 'completed', 'failed', 'processing'
-    assert(['completed', 'failed', 'processing'].includes(sub.aiGradingStatus), `Status tidak terduga: ${sub.aiGradingStatus}`);
+    assert(['completed', 'failed', 'processing'].includes(subSummary.aiGradingStatus), `Status tidak terduga: ${subSummary.aiGradingStatus}`);
     
+    // Ambil rincian detail jawaban melalui endpoint terpisah /api/submissions/:id (arsitektur bootstrap ringan)
+    const resDetail = await request(`/api/submissions/${typedSubmissionId}`, {
+      headers: { 'Authorization': `Bearer ${teacherToken}` }
+    });
+    assert.strictEqual(resDetail.status, 200);
+    const sub = resDetail.body.submission;
+
     // Jawaban siswa tidak boleh hilang
     assert(sub.answers['q-1'].essayAnswer, 'Jawaban siswa harus tetap utuh');
     
@@ -245,8 +252,16 @@ async function runAutoAIPipelineTests() {
     });
 
     assert.strictEqual(res.status, 200);
-    const sub = res.body.data.submissions.find(s => s.id === imageSubmissionId);
-    assert(sub, 'Submission foto tulisan tangan harus ditemukan');
+    const subSummary = res.body.data.submissions.find(s => s.id === imageSubmissionId);
+    assert(subSummary, 'Submission foto tulisan tangan harus ditemukan');
+
+    // Ambil rincian detail jawaban melalui endpoint terpisah /api/submissions/:id (arsitektur bootstrap ringan)
+    const resDetail = await request(`/api/submissions/${imageSubmissionId}`, {
+      headers: { 'Authorization': `Bearer ${teacherToken}` }
+    });
+    assert.strictEqual(resDetail.status, 200);
+    const sub = resDetail.body.submission;
+
     assert(sub.answers['q-2'].multimodalEvidences?.length > 0, 'Bukti foto harus terikat pada soal');
     // Berkas foto tidak hilang
     assert(sub.answers['q-2'].multimodalEvidences[0].storageUrl, 'Storage URL foto harus tetap ada');
