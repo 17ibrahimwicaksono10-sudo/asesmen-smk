@@ -3,6 +3,7 @@ import { Exam, ExamSubmission, QuestionPackage, StudentAnswer, School, ClassRoom
 import { INITIAL_SCHOOLS } from '../../data/mockData';
 import { DEFAULT_EMPLOYABILITY_PACKAGE } from '../../data/nonTestInstrument';
 import { REVISED_QUESTIONS_24 } from '../../data/revisedQuestions';
+import { apiGet } from '../../services/api';
 import {
   BarChart3,
   Users,
@@ -79,21 +80,29 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
   const [teacherFollowUpInput, setTeacherFollowUpInput] = useState('');
   const [evaluatingAi, setEvaluatingAi] = useState(false);
+  const [loadingSubmissionId, setLoadingSubmissionId] = useState<string | null>(null);
 
   const [filterTab, setFilterTab] = useState<'ALL' | 'PENDING' | 'VALIDATED'>('ALL');
 
+  // 1. Relasi Otoritatif Langsung ke Guru: classes.teacherId atau assignedClassIds
   const teacherAssignedClasses = classes.filter(c => {
+    if (
+      (c.teacherId && c.teacherId === currentUser?.id) ||
+      (currentUser?.assignedClassIds && currentUser.assignedClassIds.includes(c.id)) ||
+      (c.teacherName && currentUser?.name && (
+        c.teacherName.toLowerCase() === currentUser.name.toLowerCase() ||
+        c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase()) ||
+        currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())
+      ))
+    ) {
+      return true;
+    }
+
     const matchSchool = (guruSchool && c.schoolId === guruSchool.id) || 
       (guruSchool && isSchoolMatch(c.schoolName, guruSchool.name)) ||
       (currentUser?.schoolId && c.schoolId === currentUser.schoolId) ||
       (currentUser?.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName));
-    if (!matchSchool) return false;
-
-    return c.teacherId === currentUser?.id || 
-      c.teacherName === currentUser?.name ||
-      (currentUser?.name && c.teacherName && c.teacherName.toLowerCase().includes(currentUser.name.toLowerCase())) ||
-      (currentUser?.name && c.teacherName && currentUser.name.toLowerCase().includes(c.teacherName.toLowerCase())) ||
-      (currentUser?.assignedClassIds && currentUser.assignedClassIds.includes(c.id));
+    return Boolean(matchSchool);
   });
 
   const availableClasses = isGuru
@@ -112,6 +121,22 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
     return matchSchool && matchClass;
   });
 
+  // Kumpulkan ujian historis yang ada di riwayat submission agar tidak hilang dari filter guru
+  const historicalExams = React.useMemo(() => {
+    const activeExamIds = new Set(exams.map(e => e.id));
+    const histMap = new Map<string, { id: string; title: string; className?: string }>();
+    submissions.forEach(s => {
+      if (s.examId && !activeExamIds.has(s.examId) && !histMap.has(s.examId)) {
+        histMap.set(s.examId, {
+          id: s.examId,
+          title: s.examTitle || `Ujian Historis (${s.examId.substring(0, 10)}...)`,
+          className: s.className || 'Arsip Ujian'
+        });
+      }
+    });
+    return Array.from(histMap.values());
+  }, [exams, submissions]);
+
   const isSubmissionMatchingFilters = (s: ExamSubmission) => {
     const selectedSchoolObj = schoolsList.find(sch => sch.id === selectedSchoolId);
     const matchSchool = selectedSchoolId === 'ALL' || 
@@ -119,17 +144,18 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
       (selectedSchoolObj && isSchoolMatch(s.schoolName, selectedSchoolObj.name)) ||
       (guruSchool && isSchoolMatch(s.schoolName, guruSchool.name)) ||
       (currentUser?.schoolName && isSchoolMatch(s.schoolName, currentUser.schoolName)) ||
-      (!s.schoolId && !s.schoolName);
+      (isGuru && (!s.schoolId || s.schoolId === currentUser?.schoolId));
 
     const matchClass = selectedClassId === 'ALL' || 
       s.classId === selectedClassId || 
-      (availableClasses.length === 0) ||
-      (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase());
+      (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase().trim() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase().trim());
 
     const matchExam = selectedExamId === 'ALL' || s.examId === selectedExamId;
 
-    return matchSchool && matchClass && matchExam;
+    return Boolean(matchSchool && matchClass && matchExam);
   };
+
+  const allMatchingSubmissions = submissions.filter(isSubmissionMatchingFilters);
 
   const filteredSubmissions = submissions.filter(s => {
     if (!isSubmissionMatchingFilters(s)) return false;
@@ -156,12 +182,45 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
   const activeExamObj = exams.find(e => e.id === selectedExamId);
 
+  const handleSelectSubmission = async (sub: ExamSubmission) => {
+    setSelectedSubmission(sub);
+    setTeacherFollowUpInput(sub.teacherFollowUp || '');
+
+    // Jika answers belum ada (karena optimasi bootstrap payload cepat), muat rincian lengkap dari server on-demand
+    if (!sub.answers || Object.keys(sub.answers).length === 0) {
+      try {
+        setLoadingSubmissionId(sub.id);
+        const res = await apiGet<{ success: boolean; submission: ExamSubmission }>(`/api/submissions/${sub.id}`);
+        if (res.success && res.submission) {
+          setSelectedSubmission(res.submission);
+          onUpdateSubmission(res.submission);
+        }
+      } catch (err) {
+        console.warn('[ExamMonitor] Gagal memuat rincian lembar jawaban siswa:', err);
+      } finally {
+        setLoadingSubmissionId(null);
+      }
+    }
+  };
+
   const handleTriggerAIEvaluation = async (sub: ExamSubmission) => {
     setEvaluatingAi(true);
 
     try {
+      let targetSub = sub;
+      if (!targetSub.answers || Object.keys(targetSub.answers).length === 0) {
+        try {
+          const resDetail = await apiGet<{ success: boolean; submission: ExamSubmission }>(`/api/submissions/${sub.id}`);
+          if (resDetail.success && resDetail.submission) {
+            targetSub = resDetail.submission;
+            setSelectedSubmission(targetSub);
+            onUpdateSubmission(targetSub);
+          }
+        } catch {}
+      }
+
       // Panggil endpoint penilaian terpadu yang memproses bukti multimodal tersimpan + esai siswa
-      const res = await fetch(`/api/ai/evaluate-submission/${sub.id}`, {
+      const res = await fetch(`/api/ai/evaluate-submission/${targetSub.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
@@ -179,7 +238,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
             questionText: 'Evaluasi Komprehensif Jawaban Siswa Vokasi Kimia',
             answerKey: 'Sesuai stokiometri, K3, dan penanganan OOS ISO 17025',
             rubricGuide: 'Pedoman Rubrik DUDI Vokasi',
-            studentAnswer: JSON.stringify(sub.answers)
+            studentAnswer: JSON.stringify(targetSub.answers || {})
           })
         });
 
@@ -187,7 +246,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
         if (fbData.success && fbData.evaluation) {
           const aiNote = fbData.evaluation.constructiveFeedback || 'Pengerjaan baik, konsep K3 dikuasai.';
           const updated: ExamSubmission = {
-            ...sub,
+            ...targetSub,
             aiEvaluation: aiNote
           };
           onUpdateSubmission(updated);
@@ -293,10 +352,17 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               onChange={(e) => setSelectedExamId(e.target.value)}
               className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold text-xs focus:outline-none focus:border-purple-500"
             >
-              <option value="ALL">Semua Sesi Ujian ({availableExams.length})</option>
+              <option value="ALL">Semua Sesi Ujian ({availableExams.length + historicalExams.length})</option>
               {availableExams.map(e => (
                 <option key={e.id} value={e.id}>{e.title} ({e.className || 'Semua Kelas'}) - [{(e.status || 'draft').toUpperCase()}]</option>
               ))}
+              {historicalExams.length > 0 && (
+                <optgroup label="Sesi Ujian Historis (Arsip)">
+                  {historicalExams.map(e => (
+                    <option key={e.id} value={e.id}>{e.title} ({e.className}) - [HISTORIS]</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </div>
         </div>
@@ -325,7 +391,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span>Semua Berkas ({submissions.length})</span>
+          <span>Semua Berkas ({allMatchingSubmissions.length})</span>
         </button>
 
         <button
@@ -373,7 +439,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               return (
                 <div
                   key={sub.id}
-                  onClick={() => { setSelectedSubmission(sub); setTeacherFollowUpInput(sub.teacherFollowUp || ''); }}
+                  onClick={() => handleSelectSubmission(sub)}
                   className={`p-4 rounded-2xl border transition-all cursor-pointer ${
                     isSelected
                       ? 'bg-slate-900 border-purple-500 ring-1 ring-purple-500 shadow-xl'
@@ -415,8 +481,8 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                       {(() => {
                         const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
                         const hasPending = sub.hasPendingComponents || (!isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.requiresTeacherReview));
-                        const subRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
-                        const subMaxRawSum = Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (sub.maxRawScore || 65);
+                        const subRawSum = sub.rawScoreTotal !== undefined ? sub.rawScoreTotal : Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
+                        const subMaxRawSum = sub.maxRawScore !== undefined ? sub.maxRawScore : (Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (sub.maxRawScore || 65));
                         return (
                           <>
                             <div className="flex items-baseline justify-end gap-0.5">
@@ -460,7 +526,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedSubmission(sub);
+                          handleSelectSubmission(sub);
                           setShowFullViewModal(true);
                         }}
                         className="px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
@@ -577,8 +643,14 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                   </span>
                 </div>
 
-                {Object.entries(selectedSubmission.answers)
-                  .sort(([aId], [bId]) => {
+                {loadingSubmissionId === selectedSubmission.id ? (
+                  <div className="py-12 flex flex-col items-center justify-center text-slate-400 space-y-2 bg-slate-950/40 rounded-xl border border-slate-800">
+                    <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs">Memuat rincian lembar jawaban siswa...</span>
+                  </div>
+                ) : selectedSubmission.answers && Object.keys(selectedSubmission.answers).length > 0 ? (
+                  Object.entries(selectedSubmission.answers)
+                    .sort(([aId], [bId]) => {
                     const currentExam = exams.find((e) => e.id === selectedSubmission.examId) || activeExamObj;
                     const currentPkg = packages.find((p) => p.id === currentExam?.packageId)
                       || (currentExam?.packageId === 'pkg-employability-18' || selectedSubmission.examTitle?.toLowerCase().includes('non-tes') || selectedSubmission.examTitle?.toLowerCase().includes('employability') ? DEFAULT_EMPLOYABILITY_PACKAGE : undefined);
@@ -995,7 +1067,12 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                       )}
                     </div>
                   );
-                })}
+                })
+              ) : (
+                <div className="py-8 text-center text-xs text-slate-400 bg-slate-950/40 rounded-xl border border-slate-800">
+                  Lembar jawaban belum terisi atau sedang disiapkan.
+                </div>
+              )}
               </div>
 
               {/* Teacher Follow Up / Remedial Notes Box */}
@@ -1217,7 +1294,13 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                 })()}
 
                 {/* Daftar Soal Full View */}
-                {questionEntries.map(([qKey, ansVal], idx) => {
+                {loadingSubmissionId === selectedSubmission.id ? (
+                  <div className="py-20 flex flex-col items-center justify-center text-slate-400 space-y-3">
+                    <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm font-semibold text-slate-300">Mengunduh lembar jawaban lengkap siswa...</span>
+                  </div>
+                ) : (
+                  questionEntries.map(([qKey, ansVal], idx) => {
                   const ans = ansVal as StudentAnswer;
                   const qItem = currentPkg?.questions.find((q) => q.id === qKey)
                     || DEFAULT_EMPLOYABILITY_PACKAGE.questions.find((q) => q.id === qKey);
@@ -1618,7 +1701,8 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                       )}
                     </div>
                   );
-                })}
+                })
+              )}
               </div>
 
               {/* Footer Modal */}
