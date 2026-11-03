@@ -1,0 +1,78 @@
+name: employaskills-staging
+
+services:
+  backend-staging:
+    build:
+      context: ../../
+      dockerfile: deploy/staging/Dockerfile.backend
+    image: employaskills-backend:staging
+    container_name: employa-backend-staging
+    restart: unless-stopped
+    env_file:
+      - .env.staging
+    environment:
+      PORT: "5000"
+      NODE_ENV: "production"
+    volumes:
+      - staging_data:/app/backend/data
+      - staging_evidence:/app/backend/evidence
+    networks:
+      - staging-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/api/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1536M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  reverse-proxy:
+    image: caddy:2.9-alpine
+    container_name: employa-caddy-staging
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - staging-network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      backend-staging:
+        condition: service_healthy
+
+networks:
+  staging-network:
+    name: employa-staging-network
+    driver: bridge
+
+volumes:
+  staging_data:
+    name: employa-staging-data
+  staging_evidence:
+    name: employa-staging-evidence
+  caddy_data:
+    name: employa-staging-caddy-data
+  caddy_config:
+    name: employa-staging-caddy-config

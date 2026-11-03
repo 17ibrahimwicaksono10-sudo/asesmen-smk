@@ -63,6 +63,12 @@ class AIEvaluationQueueManager {
       return false;
     }
 
+    // 0. Pengabaian Arsip: Submission yang diarsipkan atau soft-deleted tidak boleh diproses AI
+    if (sub.isArchived || sub.deletedAt) {
+      console.log(`[AI Queue] Submission ${submissionId} (${sub.studentName}) berstatus arsip/soft-deleted. Mengabaikan penambahan antrean AI.`);
+      return false;
+    }
+
     // 1. Kebijakan Otoritas Guru: Jangan mengulang jika sudah divalidasi/disetujui guru kecuali guru meminta eksplisit
     if (!forceRetry && (sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || sub.validatedBy)) {
       console.log(`[AI Queue] Submission ${submissionId} (${sub.studentName}) sudah tervalidasi guru. Mengabaikan evaluasi otomatis.`);
@@ -105,6 +111,15 @@ class AIEvaluationQueueManager {
   }
 
   /**
+   * Membatalkan pekerjaan antrean untuk submission yang diarsipkan atau dihapus
+   */
+  public cancelJobsForSubmission(submissionId: string): void {
+    this.queuedIds.delete(submissionId);
+    this.queue = this.queue.filter(item => item.submissionId !== submissionId);
+    console.log(`[AI Queue] Antrean evaluasi AI dibatalkan untuk submission ${submissionId}`);
+  }
+
+  /**
    * Pemulihan pekerjaan terhenti akibat restart server atau container Docker
    */
   public async recoverInterruptedJobs(): Promise<number> {
@@ -117,6 +132,11 @@ class AIEvaluationQueueManager {
     const now = Date.now();
 
     for (const sub of db.submissions) {
+      // 0. Submission yang diarsipkan atau dihapus TIDAK BOLEH diproses AI
+      if (sub.isArchived || sub.deletedAt) {
+        continue;
+      }
+
       // Guru yang sudah menyetujui TIDAK BOLEH ditimpa
       if (sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || sub.validatedBy) {
         continue;
@@ -210,6 +230,12 @@ class AIEvaluationQueueManager {
     }
 
     const sub = db.submissions[subIdx];
+
+    // Imunitas Submission Diarsipkan / Soft-Deleted
+    if (!forceRetry && (sub.isArchived || sub.deletedAt)) {
+      console.log(`[AI Worker] Mengabaikan ${submissionId}: Submission berstatus arsip / soft-deleted.`);
+      return sub;
+    }
 
     // Imunitas Otoritas Guru
     if (!forceRetry && (sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || sub.validatedBy)) {
@@ -441,7 +467,7 @@ class AIEvaluationQueueManager {
           sub.aiGradingNextRetryAt = new Date(Date.now() + delayMs).toISOString();
           sub.aiGradingStatus = 'pending';
           console.log(`[AI Worker] Evaluasi ${submissionId} tertunda sementara. Menjadwalkan retry #${currentAttempts + 1} dalam ${Math.round(delayMs / 1000)} detik.`);
-          
+
           setTimeout(() => {
             this.enqueue(submissionId, true);
           }, delayMs);

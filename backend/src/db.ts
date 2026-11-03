@@ -15,7 +15,8 @@ import {
   ExamSubmission,
   ArchivedItem,
   SystemSettings,
-  PortfolioItem
+  PortfolioItem,
+  SubmissionAuditLog
 } from "./types";
 import {
   PRESET_USERS,
@@ -44,6 +45,7 @@ export interface DatabaseSchema {
   portfolios: PortfolioItem[];
   drafts?: Record<string, any>;
   readinessProfiles?: Record<string, any>;
+  submissionAuditLogs?: SubmissionAuditLog[];
   lastUpdated: string;
 }
 
@@ -108,7 +110,7 @@ export function migrateEvidenceBase64(db: DatabaseSchema, storageDir: string): b
       const base64Data = ev.fileData.replace(/^data:[^;]+;base64,/, "");
       const buffer = Buffer.from(base64Data, "base64");
       const hash = crypto.createHash("sha256").update(buffer).digest("hex");
-      
+
       const isAudio = ev.modalityType === "audio" || (ev.mimeType && ev.mimeType.includes("audio"));
       const isHandwriting = ev.modalityType === "handwriting" || (ev.mimeType && ev.mimeType.includes("image"));
       const ext = path.extname(ev.fileName || "") || (isAudio ? ".webm" : isHandwriting ? ".jpg" : ".pdf");
@@ -262,7 +264,7 @@ export function saveDb(): boolean {
     // Penulisan atomik (Atomic Write) melalui berkas temporer untuk mencegah korupsi data saat konkurensi
     const tempFile = path.join(targetDir, `.database.json.tmp.${process.pid}.${Date.now()}`);
     fs.writeFileSync(tempFile, JSON.stringify(dbCache, null, 2), { encoding: "utf-8", mode: fileMode });
-    
+
     let renamed = false;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {

@@ -27,9 +27,23 @@ export function clearAuthToken(): void {
   } catch {}
 }
 
+const API_BASE_URL = ((import.meta.env as any).VITE_API_URL || '').replace(/\/$/, '');
+
+export function resolveApiUrl(url: string): string {
+  if (url.startsWith('/api') && API_BASE_URL) {
+    return `${API_BASE_URL}${url}`;
+  }
+  return url;
+}
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const token = getAuthToken();
   const headers = new Headers(init.headers || {});
+
+  let resolvedInput = input;
+  if (typeof input === 'string') {
+    resolvedInput = resolveApiUrl(input);
+  }
 
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
@@ -40,7 +54,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     headers.set('Content-Type', 'application/json');
   }
 
-  return fetch(input, {
+  return fetch(resolvedInput, {
     ...init,
     headers,
   });

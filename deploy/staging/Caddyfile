@@ -1,0 +1,29 @@
+{
+    email admin@employaskills.com
+}
+
+# Reverse Proxy HTTPS Otomatis untuk Backend Staging EmployaSkills
+# Domain nip.io otomatis merujuk ke 38.9.47.151 dan menerbitkan sertifikat SSL Let's Encrypt / ZeroSSL
+api.38.9.47.151.nip.io, 38.9.47.151.nip.io, staging-api.employaskills.duckdns.org {
+    reverse_proxy backend-staging:5000 {
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Header Keamanan
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    encode gzip zstd
+
+    log {
+        output stdout
+        format console
+    }
+}

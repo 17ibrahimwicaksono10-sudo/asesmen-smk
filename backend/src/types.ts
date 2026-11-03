@@ -212,7 +212,7 @@ export interface MultimodalEvidence {
   fileData?: string; // base64 or dataUrl (persisted in safe store)
   previewUrl?: string; // preview URL (storageUrl or dataUrl, never rely on temporary blob alone)
   audioDurationSeconds?: number;
-  
+
   // Audit-Ready & Storage Traceability (Jaminan Bukti Asli Persisten)
   storageUrl?: string;       // URL persisten ke server arsip (e.g. /api/evidence/file/...)
   storagePath?: string;      // Path fisik penyimpanan pada server
@@ -393,6 +393,13 @@ export interface ExamSubmission {
   requiresTeacherReview?: boolean;
   teacherEditLogs?: TeacherEditLog[];
   correctionTimeSeconds?: number; // Time saved during grading
+
+  // Pengelolaan Arsip & Soft-Delete (Fitur 1)
+  isArchived?: boolean;          // Status diarsipkan / disembunyikan dari daftar utama
+  archivedAt?: string;           // Waktu pengarsipan
+  archivedBy?: string;           // Identitas guru / admin yang mengarsipkan
+  archiveReason?: string;        // Alasan pengarsipan
+  deletedAt?: string;            // Kompatibilitas skema PostgreSQL deleted_at
 }
 
 export interface ResearchAnalyticsSummary {
@@ -518,5 +525,14 @@ export interface StudentReadinessProfileData {
   validatedAt?: string;
 }
 
-
-
+export interface SubmissionAuditLog {
+  id: string;
+  submissionId: string;
+  action: 'archive' | 'restore' | 'cleanup_permanent';
+  performedBy: string;
+  userRole: string;
+  schoolId?: string;
+  reason?: string;
+  metadata?: any;
+  createdAt: string;
+}

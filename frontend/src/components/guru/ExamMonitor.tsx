@@ -32,9 +32,15 @@ import {
   Check,
   Hash,
   BookOpen,
-  Clock
+  Clock,
+  Archive,
+  Trash2,
+  RotateCcw,
+  FileSpreadsheet,
+  Search
 } from 'lucide-react';
 import { MultimodalReviewModal } from '../common/MultimodalReviewModal';
+import { ExportExcelModal } from './ExportExcelModal';
 
 interface ExamMonitorProps {
   exams: Exam[];
@@ -64,7 +70,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
   const isGuru = currentUser?.role === 'guru';
   const schoolsList = schools.length > 0 ? schools : INITIAL_SCHOOLS;
-  const guruSchool = currentUser ? schoolsList.find(s => 
+  const guruSchool = currentUser ? schoolsList.find(s =>
     (currentUser.schoolId && s.id === currentUser.schoolId) ||
     (currentUser.schoolName && isSchoolMatch(s.name, currentUser.schoolName))
   ) : undefined;
@@ -83,7 +89,14 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
   const [evaluatingAi, setEvaluatingAi] = useState(false);
   const [loadingSubmissionId, setLoadingSubmissionId] = useState<string | null>(null);
 
-  const [filterTab, setFilterTab] = useState<'ALL' | 'PENDING' | 'VALIDATED'>('ALL');
+  const [filterTab, setFilterTab] = useState<'ALL' | 'PENDING' | 'VALIDATED' | 'ARCHIVED'>('ALL');
+  const [studentSearch, setStudentSearch] = useState<string>('');
+  const [selectedSubmissionIds, setSelectedSubmissionIds] = useState<string[]>([]);
+  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [bulkActionLoading, setBulkActionLoading] = useState<boolean>(false);
+  const [cleanupModalSubmission, setCleanupModalSubmission] = useState<ExamSubmission | null>(null);
+  const [cleanupReason, setCleanupReason] = useState<string>('');
+  const [cleanupConfirm, setCleanupConfirm] = useState<boolean>(false);
 
   // 1. Relasi Otoritatif Langsung ke Guru: classes.teacherId atau assignedClassIds
   const teacherAssignedClasses = classes.filter(c => {
@@ -99,7 +112,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
       return true;
     }
 
-    const matchSchool = (guruSchool && c.schoolId === guruSchool.id) || 
+    const matchSchool = (guruSchool && c.schoolId === guruSchool.id) ||
       (guruSchool && isSchoolMatch(c.schoolName, guruSchool.name)) ||
       (currentUser?.schoolId && c.schoolId === currentUser.schoolId) ||
       (currentUser?.schoolName && isSchoolMatch(c.schoolName, currentUser.schoolName));
@@ -107,8 +120,8 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
   });
 
   const availableClasses = isGuru
-    ? (teacherAssignedClasses.length > 0 
-        ? teacherAssignedClasses 
+    ? (teacherAssignedClasses.length > 0
+        ? teacherAssignedClasses
         : classes.filter(c => (guruSchool && c.schoolId === guruSchool.id) || (currentUser?.schoolId && c.schoolId === currentUser.schoolId)))
     : (classes.length > 0 ? (
         selectedSchoolId === 'ALL'
@@ -140,26 +153,54 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
   const isSubmissionMatchingFilters = (s: ExamSubmission) => {
     const selectedSchoolObj = schoolsList.find(sch => sch.id === selectedSchoolId);
-    const matchSchool = selectedSchoolId === 'ALL' || 
-      s.schoolId === selectedSchoolId || 
+    const matchSchool = selectedSchoolId === 'ALL' ||
+      s.schoolId === selectedSchoolId ||
       (selectedSchoolObj && isSchoolMatch(s.schoolName, selectedSchoolObj.name)) ||
       (guruSchool && isSchoolMatch(s.schoolName, guruSchool.name)) ||
       (currentUser?.schoolName && isSchoolMatch(s.schoolName, currentUser.schoolName)) ||
       (isGuru && (!s.schoolId || s.schoolId === currentUser?.schoolId));
 
-    const matchClass = selectedClassId === 'ALL' || 
-      s.classId === selectedClassId || 
+    const matchClass = selectedClassId === 'ALL' ||
+      s.classId === selectedClassId ||
       (s.className && availableClasses.find(c => c.id === selectedClassId)?.name && s.className.toLowerCase().trim() === availableClasses.find(c => c.id === selectedClassId)?.name.toLowerCase().trim());
 
     const matchExam = selectedExamId === 'ALL' || s.examId === selectedExamId;
 
-    return Boolean(matchSchool && matchClass && matchExam);
+    const matchSearch = !studentSearch.trim() ||
+      (s.studentName && s.studentName.toLowerCase().includes(studentSearch.toLowerCase().trim())) ||
+      (s.studentNis && s.studentNis.toLowerCase().includes(studentSearch.toLowerCase().trim()));
+
+    return Boolean(matchSchool && matchClass && matchExam && matchSearch);
   };
 
-  const allMatchingSubmissions = submissions.filter(isSubmissionMatchingFilters);
+  const allMatchingSubmissions = submissions.filter(s => isSubmissionMatchingFilters(s) && !s.isArchived && !s.deletedAt);
+
+  const pendingCount = submissions.filter(s => {
+    if (!isSubmissionMatchingFilters(s) || s.isArchived || s.deletedAt) return false;
+    const isGuruValidated = s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
+    return !isGuruValidated && (s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview);
+  }).length;
+
+  const validatedCount = submissions.filter(s => {
+    if (!isSubmissionMatchingFilters(s) || s.isArchived || s.deletedAt) return false;
+    return s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
+  }).length;
+
+  const archivedCount = submissions.filter(s => {
+    if (!isSubmissionMatchingFilters(s)) return false;
+    return Boolean(s.isArchived || s.deletedAt);
+  }).length;
 
   const filteredSubmissions = submissions.filter(s => {
     if (!isSubmissionMatchingFilters(s)) return false;
+
+    const isArchived = Boolean(s.isArchived || s.deletedAt);
+    if (filterTab === 'ARCHIVED') {
+      return isArchived;
+    }
+
+    // Default: Tabs non-arsip tidak pernah menampilkan submission yang diarsipkan
+    if (isArchived) return false;
 
     const isGuruValidated = s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
     const isPending = !isGuruValidated && (s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview);
@@ -169,17 +210,6 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
     if (filterTab === 'VALIDATED') return isValidated;
     return true;
   });
-
-  const pendingCount = submissions.filter(s => {
-    if (!isSubmissionMatchingFilters(s)) return false;
-    const isGuruValidated = s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
-    return !isGuruValidated && (s.status === 'perlu_pemeriksaan' || s.validationStatus === 'pending_review' || s.requiresTeacherReview);
-  }).length;
-
-  const validatedCount = submissions.filter(s => {
-    if (!isSubmissionMatchingFilters(s)) return false;
-    return s.validationStatus === 'approved' || s.validationStatus === 'revised' || Boolean(s.validatedBy);
-  }).length;
 
   const activeExamObj = exams.find(e => e.id === selectedExamId);
 
@@ -248,6 +278,152 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
     onUpdateSubmission(updated);
     setSelectedSubmission(updated);
     setTeacherFollowUpInput('');
+  };
+
+  const handleArchiveSubmission = async (sub: ExamSubmission) => {
+    const reason = window.prompt("Alasan pengarsipan submission (opsional):", "Diarsipkan dari antrean aktif");
+    if (reason === null) return;
+
+    try {
+      const res = await apiPost<{ success: boolean; message: string; submission: ExamSubmission }>(
+        `/api/submissions/${sub.id}/archive`,
+        { reason: reason || 'Diarsipkan oleh guru/admin' }
+      );
+      if (res.success && res.submission) {
+        onUpdateSubmission(res.submission);
+        setSelectedSubmission(res.submission);
+        setSelectedSubmissionIds(prev => prev.filter(id => id !== sub.id));
+      }
+    } catch (err: any) {
+      alert(`Gagal mengarsipkan submission: ${err?.message || err}`);
+    }
+  };
+
+  const handleRestoreSubmission = async (sub: ExamSubmission) => {
+    if (!window.confirm(`Pulihkan submission siswa ${sub.studentName} ke antrean utama?`)) return;
+
+    try {
+      const res = await apiPost<{ success: boolean; message: string; submission: ExamSubmission }>(
+        `/api/submissions/${sub.id}/restore`,
+        {}
+      );
+      if (res.success && res.submission) {
+        onUpdateSubmission(res.submission);
+        setSelectedSubmission(res.submission);
+        setSelectedSubmissionIds(prev => prev.filter(id => id !== sub.id));
+      }
+    } catch (err: any) {
+      alert(`Gagal memulihkan submission: ${err?.message || err}`);
+    }
+  };
+
+  const handleBulkArchive = async () => {
+    if (selectedSubmissionIds.length === 0) return;
+    const reason = window.prompt(
+      `Arsipkan ${selectedSubmissionIds.length} submission yang dipilih? Masukkan alasan (opsional):`,
+      "Diarsipkan massal oleh guru/admin"
+    );
+    if (reason === null) return;
+
+    setBulkActionLoading(true);
+    try {
+      const res = await apiPost<{ success: boolean; processed: string[]; errors: any[]; count: number }>(
+        '/api/submissions/bulk-archive',
+        { submissionIds: selectedSubmissionIds, reason: reason || 'Diarsipkan massal' }
+      );
+      if (res.success) {
+        res.processed.forEach(id => {
+          const target = submissions.find(s => s.id === id);
+          if (target) {
+            onUpdateSubmission({
+              ...target,
+              isArchived: true,
+              archivedAt: new Date().toISOString(),
+              archiveReason: reason || 'Diarsipkan massal'
+            });
+          }
+        });
+        setSelectedSubmissionIds([]);
+        if (res.errors && res.errors.length > 0) {
+          alert(`Berhasil mengarsipkan ${res.count} submission. Terdapat ${res.errors.length} gagal.`);
+        }
+      }
+    } catch (err: any) {
+      alert(`Gagal melakukan arsip massal: ${err?.message || err}`);
+    } finally {
+      setBulkActionLoading(false);
+    }
+  };
+
+  const handleBulkRestore = async () => {
+    if (selectedSubmissionIds.length === 0) return;
+    if (!window.confirm(`Pulihkan ${selectedSubmissionIds.length} submission yang dipilih dari arsip ke antrean utama?`)) return;
+
+    setBulkActionLoading(true);
+    try {
+      const res = await apiPost<{ success: boolean; processed: string[]; errors: any[]; count: number }>(
+        '/api/submissions/bulk-restore',
+        { submissionIds: selectedSubmissionIds }
+      );
+      if (res.success) {
+        res.processed.forEach(id => {
+          const target = submissions.find(s => s.id === id);
+          if (target) {
+            onUpdateSubmission({
+              ...target,
+              isArchived: false,
+              archivedAt: undefined,
+              archivedBy: undefined,
+              archiveReason: undefined,
+              deletedAt: undefined
+            });
+          }
+        });
+        setSelectedSubmissionIds([]);
+        if (res.errors && res.errors.length > 0) {
+          alert(`Berhasil memulihkan ${res.count} submission. Terdapat ${res.errors.length} gagal.`);
+        }
+      }
+    } catch (err: any) {
+      alert(`Gagal memulihkan submission massal: ${err?.message || err}`);
+    } finally {
+      setBulkActionLoading(false);
+    }
+  };
+
+  const handleCleanupPermanent = async () => {
+    if (!cleanupModalSubmission) return;
+    if (!cleanupConfirm) {
+      alert("Centang kotak konfirmasi penghapusan permanen terlebih dahulu.");
+      return;
+    }
+    if (!cleanupReason || cleanupReason.trim().length < 5) {
+      alert("Alasan cleanup permanen minimal 5 karakter.");
+      return;
+    }
+
+    try {
+      const res = await apiPost<{ success: boolean; message: string }>(
+        `/api/submissions/${cleanupModalSubmission.id}/cleanup`,
+        { confirmation: true, reason: cleanupReason.trim() }
+      );
+      if (res.success) {
+        onUpdateSubmission({
+          ...cleanupModalSubmission,
+          isArchived: true,
+          deletedAt: new Date().toISOString()
+        });
+        if (selectedSubmission?.id === cleanupModalSubmission.id) {
+          setSelectedSubmission(null);
+        }
+        setCleanupModalSubmission(null);
+        setCleanupReason('');
+        setCleanupConfirm(false);
+        alert("Submission artefak pengujian berhasil dibersihkan secara permanen.");
+      }
+    } catch (err: any) {
+      alert(`Gagal melakukan cleanup: ${err?.message || err}`);
+    }
   };
 
   return (
@@ -360,41 +536,63 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
         )}
       </div>
 
-      {/* Queue Filter Tabs (Tahap 6) */}
-      <div className="flex items-center gap-2 border-b border-slate-800 pb-3 text-xs">
-        <button
-          onClick={() => setFilterTab('ALL')}
-          className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
-            filterTab === 'ALL'
-              ? 'bg-purple-600 text-white shadow-md'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <span>Semua Berkas ({allMatchingSubmissions.length})</span>
-        </button>
+      {/* Queue Filter Tabs & Ekspor Excel */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setFilterTab('ALL')}
+            className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              filterTab === 'ALL'
+                ? 'bg-purple-600 text-white shadow-md'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <span>Semua Berkas ({allMatchingSubmissions.length})</span>
+          </button>
+
+          <button
+            onClick={() => setFilterTab('PENDING')}
+            className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              filterTab === 'PENDING'
+                ? 'bg-amber-600 text-white shadow-md ring-1 ring-amber-400'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-300" />
+            <span>Antrean Perlu Pemeriksaan ({pendingCount})</span>
+          </button>
+
+          <button
+            onClick={() => setFilterTab('VALIDATED')}
+            className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              filterTab === 'VALIDATED'
+                ? 'bg-emerald-600 text-white shadow-md'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-200" />
+            <span>Sudah Tervalidasi ({validatedCount})</span>
+          </button>
+
+          <button
+            onClick={() => setFilterTab('ARCHIVED')}
+            className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              filterTab === 'ARCHIVED'
+                ? 'bg-rose-700 text-white shadow-md ring-1 ring-rose-400'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Archive className="w-3.5 h-3.5 text-rose-300" />
+            <span>Submission Diarsipkan ({archivedCount})</span>
+          </button>
+        </div>
 
         <button
-          onClick={() => setFilterTab('PENDING')}
-          className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
-            filterTab === 'PENDING'
-              ? 'bg-amber-600 text-white shadow-md ring-1 ring-amber-400'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
+          onClick={() => setIsExportModalOpen(true)}
+          className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-700 hover:to-teal-800 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all cursor-pointer"
         >
-          <ShieldAlert className="w-3.5 h-3.5 text-amber-300" />
-          <span>Antrean Perlu Pemeriksaan ({pendingCount})</span>
-        </button>
-
-        <button
-          onClick={() => setFilterTab('VALIDATED')}
-          className={`px-3.5 py-2 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
-            filterTab === 'VALIDATED'
-              ? 'bg-emerald-600 text-white shadow-md'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-200" />
-          <span>Sudah Tervalidasi ({validatedCount})</span>
+          <FileSpreadsheet className="w-4 h-4" />
+          <span>Ekspor Excel (.xlsx)</span>
         </button>
       </div>
 
@@ -402,11 +600,91 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
       <div className="grid lg:grid-cols-12 gap-6">
         {/* Left List */}
         <div className="lg:col-span-5 space-y-3">
-          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Berkas Lembar Jawaban Masuk</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+              {filterTab === 'ARCHIVED' ? 'Arsip Lembar Jawaban Siswa' : 'Berkas Lembar Jawaban Masuk'} ({filteredSubmissions.length})
+            </h3>
+            {filteredSubmissions.length > 0 && (
+              <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={filteredSubmissions.length > 0 && filteredSubmissions.every(s => selectedSubmissionIds.includes(s.id))}
+                  onChange={() => {
+                    const allSelected = filteredSubmissions.every(s => selectedSubmissionIds.includes(s.id));
+                    if (allSelected) {
+                      setSelectedSubmissionIds([]);
+                    } else {
+                      setSelectedSubmissionIds(filteredSubmissions.map(s => s.id));
+                    }
+                  }}
+                  className="rounded border-slate-700 bg-slate-900 text-purple-600 cursor-pointer"
+                />
+                <span>Pilih Semua</span>
+              </label>
+            )}
+          </div>
+
+          {/* Pencarian Nama Siswa / NIS */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Cari nama siswa atau NIS..."
+              value={studentSearch}
+              onChange={e => setStudentSearch(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+            />
+            {studentSearch && (
+              <button
+                onClick={() => setStudentSearch('')}
+                className="absolute right-2.5 top-2 text-slate-500 hover:text-white text-xs cursor-pointer"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {/* Sticky Floating Bulk Action Bar */}
+          {selectedSubmissionIds.length > 0 && (
+            <div className="p-3 bg-gradient-to-r from-purple-950 to-indigo-950 border border-purple-800 rounded-xl flex items-center justify-between gap-2 text-xs shadow-lg animate-fade-in">
+              <span className="font-bold text-purple-200">
+                {selectedSubmissionIds.length} submission dipilih
+              </span>
+              <div className="flex items-center gap-1.5">
+                {filterTab === 'ARCHIVED' ? (
+                  <button
+                    onClick={handleBulkRestore}
+                    disabled={bulkActionLoading}
+                    className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg flex items-center gap-1 shadow cursor-pointer transition disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Pulihkan</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleBulkArchive}
+                    disabled={bulkActionLoading}
+                    className="px-3 py-1 bg-rose-700 hover:bg-rose-600 text-white font-bold rounded-lg flex items-center gap-1 shadow cursor-pointer transition disabled:opacity-50"
+                  >
+                    <Archive className="w-3 h-3" />
+                    <span>Arsipkan</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedSubmissionIds([])}
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg cursor-pointer"
+                >
+                  Batal
+                </button>
+              </div>
+            </div>
+          )}
 
           {filteredSubmissions.length === 0 ? (
             <div className="text-center py-10 bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs text-slate-400">
-              Belum ada berkas jawaban siswa yang sesuai dengan filter antrean ini.
+              {filterTab === 'ARCHIVED'
+                ? 'Tidak ada submission yang diarsipkan.'
+                : 'Belum ada berkas jawaban siswa yang sesuai dengan filter antrean ini.'}
             </div>
           ) : (
             filteredSubmissions.map(sub => {
@@ -414,6 +692,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               const isPending = sub.status === 'perlu_pemeriksaan' || sub.validationStatus === 'pending_review' || sub.requiresTeacherReview;
               const originalAiScore = sub.originalAIScoreTotal !== undefined ? sub.originalAIScoreTotal : sub.totalScore;
               const hasScoreEdited = sub.teacherScoreTotal !== undefined && sub.teacherScoreTotal !== originalAiScore;
+              const isArchived = Boolean(sub.isArchived || sub.deletedAt);
 
               return (
                 <div
@@ -425,117 +704,169 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                       : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                   }`}
                 >
-                  <div className="flex justify-between items-start gap-2">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <h4 className="text-sm font-bold text-white">{sub.studentName}</h4>
-                        {(() => {
-                          const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
-                          const isProcessing = sub.aiGradingStatus === 'processing';
-                          const isAIFailed = sub.aiGradingStatus === 'failed';
-                          const isNeedsReview = !isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.validationStatus === 'pending_review' || sub.requiresTeacherReview || isAIFailed);
-                          if (isGuruValidated) {
-                            return (
-                              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
-                                Tervalidasi Guru {sub.validatedBy ? `(${sub.validatedBy.split(' ')[0]})` : ''}
-                              </span>
-                            );
-                          }
-                          if (isProcessing) {
-                            return (
-                              <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-bold animate-pulse">
-                                Sedang Diproses AI
-                              </span>
-                            );
-                          }
-                          if (isAIFailed) {
-                            return (
-                              <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold">
-                                Gagal AI / Perlu Uji Guru
-                              </span>
-                            );
-                          }
-                          if (isNeedsReview) {
-                            return (
-                              <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
-                                Perlu Review Guru
-                              </span>
-                            );
-                          }
-                          return (
-                            <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[10px] font-bold">
-                              Dinilai Sistem (Otomatis)
-                            </span>
-                          );
-                        })()}
-                      </div>
-                      <p className="text-xs text-slate-400">NIS: {sub.studentNis} • Kelas: {sub.className}</p>
-                    </div>
-
-                    <div className="text-right">
-                      {(() => {
-                        const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
-                        const hasPending = sub.hasPendingComponents || (!isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.requiresTeacherReview));
-                        const subRawSum = sub.rawScoreTotal !== undefined ? sub.rawScoreTotal : Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
-                        const subMaxRawSum = sub.maxRawScore !== undefined ? sub.maxRawScore : (Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (sub.maxRawScore || 65));
-                        return (
-                          <>
-                            <div className="flex items-baseline justify-end gap-0.5">
-                              {hasPending ? (
-                                <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
-                                  Menunggu Review Guru
-                                </span>
-                              ) : (
-                                <>
-                                  <span className="text-base font-black text-emerald-400">{sub.totalScore}</span>
-                                  <span className="text-[10px] text-slate-400">/ 100</span>
-                                </>
-                              )}
-                            </div>
-                            <div className="text-[10px] text-slate-400 font-medium">
-                              {hasPending ? (
-                                <span>Skor Sah Sementara: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong></span>
-                              ) : (
-                                <span>Skor Sah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong></span>
-                              )}
-                            </div>
-                          </>
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedSubmissionIds.includes(sub.id)}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        setSelectedSubmissionIds(prev =>
+                          prev.includes(sub.id) ? prev.filter(id => id !== sub.id) : [...prev, sub.id]
                         );
-                      })()}
-                    </div>
-                  </div>
+                      }}
+                      className="mt-1 h-4 w-4 rounded border-slate-700 bg-slate-950 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                    />
 
-                  {/* Non-destructive score history tag */}
-                  {hasScoreEdited && (
-                    <div className="mt-2 text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-800/40 flex justify-between">
-                      <span>Nilai Awal AI: <strong className="line-through text-slate-400">{originalAiScore} / 100</strong></span>
-                      <span>Nilai Guru: <strong className="text-emerald-400 font-bold">{sub.teacherScoreTotal} / 100</strong></span>
-                    </div>
-                  )}
+                    <div className="flex-1">
+                      <div className="flex justify-between items-start gap-2">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                            <h4 className="text-sm font-bold text-white">{sub.studentName}</h4>
+                            {isArchived && (
+                              <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold flex items-center gap-1">
+                                <Archive className="w-2.5 h-2.5" /> Diarsipkan
+                              </span>
+                            )}
+                            {(() => {
+                              const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
+                              const isProcessing = sub.aiGradingStatus === 'processing';
+                              const isAIFailed = sub.aiGradingStatus === 'failed';
+                              const isNeedsReview = !isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.validationStatus === 'pending_review' || sub.requiresTeacherReview || isAIFailed);
+                              if (isGuruValidated) {
+                                return (
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
+                                    Tervalidasi Guru {sub.validatedBy ? `(${sub.validatedBy.split(' ')[0]})` : ''}
+                                  </span>
+                                );
+                              }
+                              if (isProcessing) {
+                                return (
+                                  <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-bold animate-pulse">
+                                    Sedang Diproses AI
+                                  </span>
+                                );
+                              }
+                              if (isAIFailed) {
+                                return (
+                                  <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold">
+                                    Gagal AI / Perlu Uji Guru
+                                  </span>
+                                );
+                              }
+                              if (isNeedsReview) {
+                                return (
+                                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                                    Perlu Review Guru
+                                  </span>
+                                );
+                              }
+                              return (
+                                <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[10px] font-bold">
+                                  Dinilai Sistem (Otomatis)
+                                </span>
+                              );
+                            })()}
+                          </div>
+                          <p className="text-xs text-slate-400">NIS: {sub.studentNis} • Kelas: {sub.className}</p>
+                        </div>
 
-                  {sub.validatedBy && (
-                    <div className="mt-1 text-[10px] text-slate-400">
-                      Validator: <strong className="text-slate-200">{sub.validatedBy}</strong>
-                    </div>
-                  )}
+                        <div className="text-right">
+                          {(() => {
+                            const isGuruValidated = sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
+                            const hasPending = sub.hasPendingComponents || (!isGuruValidated && (sub.status === 'perlu_pemeriksaan' || sub.requiresTeacherReview));
+                            const subRawSum = sub.rawScoreTotal !== undefined ? sub.rawScoreTotal : Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.score || 0), 0);
+                            const subMaxRawSum = sub.maxRawScore !== undefined ? sub.maxRawScore : (Object.values(sub.answers || {}).reduce((acc, a) => acc + (a.maxScore || 5), 0) || (sub.maxRawScore || 65));
+                            return (
+                              <>
+                                <div className="flex items-baseline justify-end gap-0.5">
+                                  {hasPending ? (
+                                    <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
+                                      Menunggu Review Guru
+                                    </span>
+                                  ) : (
+                                    <>
+                                      <span className="text-base font-black text-emerald-400">{sub.totalScore}</span>
+                                      <span className="text-[10px] text-slate-400">/ 100</span>
+                                    </>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-medium">
+                                  {hasPending ? (
+                                    <span>Skor Sah Sementara: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong></span>
+                                  ) : (
+                                    <span>Skor Sah: <strong className="text-slate-300">{subRawSum} / {subMaxRawSum} Poin</strong></span>
+                                  )}
+                                </div>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </div>
 
-                  <div className="mt-3 pt-2 border-t border-slate-800/80 flex flex-wrap justify-between items-center gap-2 text-[11px] text-slate-400">
-                    <span>Waktu: {sub.submitTime}</span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSelectSubmission(sub);
-                          setShowFullViewModal(true);
-                        }}
-                        className="px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
-                        title="Buka full lembar jawaban siswa"
-                      >
-                        <Maximize2 className="w-2.5 h-2.5" /> Full Jawaban
-                      </button>
-                      <span className="text-purple-400 font-semibold flex items-center gap-1">
-                        <Eye className="w-3 h-3" /> Periksa Detail
-                      </span>
+                      {/* Non-destructive score history tag */}
+                      {hasScoreEdited && (
+                        <div className="mt-2 text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-800/40 flex justify-between">
+                          <span>Nilai Awal AI: <strong className="line-through text-slate-400">{originalAiScore} / 100</strong></span>
+                          <span>Nilai Guru: <strong className="text-emerald-400 font-bold">{sub.teacherScoreTotal} / 100</strong></span>
+                        </div>
+                      )}
+
+                      {sub.validatedBy && (
+                        <div className="mt-1 text-[10px] text-slate-400">
+                          Validator: <strong className="text-slate-200">{sub.validatedBy}</strong>
+                        </div>
+                      )}
+
+                      {/* Informasi Pengarsipan */}
+                      {isArchived && sub.archiveReason && (
+                        <div className="mt-1.5 text-[10px] text-rose-300/80 bg-rose-950/30 px-2 py-1 rounded border border-rose-900/40">
+                          Alasan Arsip: {sub.archiveReason}
+                        </div>
+                      )}
+
+                      <div className="mt-3 pt-2 border-t border-slate-800/80 flex flex-wrap justify-between items-center gap-2 text-[11px] text-slate-400">
+                        <span>Waktu: {sub.submitTime}</span>
+                        <div className="flex items-center gap-2">
+                          {isArchived ? (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRestoreSubmission(sub);
+                              }}
+                              className="px-2 py-0.5 rounded bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
+                              title="Pulihkan submission dari arsip"
+                            >
+                              <RotateCcw className="w-2.5 h-2.5" /> Pulihkan
+                            </button>
+                          ) : (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleArchiveSubmission(sub);
+                              }}
+                              className="px-2 py-0.5 rounded bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
+                              title="Arsipkan submission ini"
+                            >
+                              <Archive className="w-2.5 h-2.5" /> Arsipkan
+                            </button>
+                          )}
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSelectSubmission(sub);
+                              setShowFullViewModal(true);
+                            }}
+                            className="px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
+                            title="Buka full lembar jawaban siswa"
+                          >
+                            <Maximize2 className="w-2.5 h-2.5" /> Full Jawaban
+                          </button>
+                          <span className="text-purple-400 font-semibold flex items-center gap-1">
+                            <Eye className="w-3 h-3" /> Periksa Detail
+                          </span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -551,11 +882,55 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
               <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-4 gap-3">
                 <div>
                   <span className="text-xs text-purple-400 font-bold uppercase tracking-wider">Detail Jawaban & Evaluasi</span>
-                  <h3 className="text-lg font-bold text-white">{selectedSubmission.studentName} ({selectedSubmission.studentNis})</h3>
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <span>{selectedSubmission.studentName} ({selectedSubmission.studentNis})</span>
+                    {(selectedSubmission.isArchived || selectedSubmission.deletedAt) && (
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                        Arsip
+                      </span>
+                    )}
+                  </h3>
                   <p className="text-xs text-slate-400">{selectedSubmission.examTitle}</p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {/* Tombol Arsipkan / Pulihkan */}
+                  {!selectedSubmission.isArchived && !selectedSubmission.deletedAt ? (
+                    <button
+                      onClick={() => handleArchiveSubmission(selectedSubmission)}
+                      className="px-3 py-1.5 rounded-xl bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700/60 font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer transition"
+                      title="Arsipkan submission ini dari antrean aktif"
+                    >
+                      <Archive className="w-3.5 h-3.5 text-rose-300" />
+                      <span>Arsipkan</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handleRestoreSubmission(selectedSubmission)}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-900/60 hover:bg-emerald-800 text-emerald-200 border border-emerald-700/60 font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer transition"
+                      title="Pulihkan submission ke antrean aktif"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>Pulihkan dari Arsip</span>
+                    </button>
+                  )}
+
+                  {/* Tombol Cleanup Permanen Khusus Admin */}
+                  {currentUser?.role === 'admin' && (
+                    <button
+                      onClick={() => {
+                        setCleanupModalSubmission(selectedSubmission);
+                        setCleanupConfirm(false);
+                        setCleanupReason('Pembersihan artefak pengujian sistem');
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-red-950 hover:bg-red-900 text-red-300 border border-red-800/80 font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer transition"
+                      title="Hapus submission artefak pengujian secara permanen (Khusus Admin)"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                      <span>Cleanup Permanen</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => setShowFullViewModal(true)}
                     className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md cursor-pointer transition"
@@ -575,7 +950,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
 
                   <button
                     onClick={() => handleTriggerAIEvaluation(selectedSubmission)}
-                    disabled={evaluatingAi}
+                    disabled={evaluatingAi || selectedSubmission.isArchived || !!selectedSubmission.deletedAt}
                     className="px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md cursor-pointer disabled:opacity-50 transition"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-amber-300" />
@@ -1829,6 +2204,84 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal Cleanup Permanen Artefak Pengujian (Admin Only) */}
+      {cleanupModalSubmission && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-red-800/80 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl text-white">
+            <div className="flex items-center gap-3 text-red-400">
+              <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/20">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-bold text-base text-white">Prosedur Cleanup Permanen</h3>
+                <p className="text-xs text-red-300">Penghapusan permanen artefak pengujian (Khusus Admin)</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs space-y-1 text-slate-300">
+              <p><strong>Siswa:</strong> {cleanupModalSubmission.studentName} ({cleanupModalSubmission.studentNis})</p>
+              <p><strong>Ujian:</strong> {cleanupModalSubmission.examTitle}</p>
+              <p><strong>Skor:</strong> {cleanupModalSubmission.totalScore}</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Alasan Penghapusan Permanen (Wajib untuk Audit Trail):
+              </label>
+              <textarea
+                value={cleanupReason}
+                onChange={e => setCleanupReason(e.target.value)}
+                placeholder="Contoh: Pembersihan data dummy uji coba otomatis sistem..."
+                rows={3}
+                className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500"
+              />
+            </div>
+
+            <label className="flex items-start gap-2.5 text-xs text-slate-300 cursor-pointer p-2 rounded-lg bg-red-950/20 border border-red-900/40">
+              <input
+                type="checkbox"
+                checked={cleanupConfirm}
+                onChange={e => setCleanupConfirm(e.target.checked)}
+                className="mt-0.5 rounded border-red-800 bg-slate-950 text-red-600"
+              />
+              <span>Saya memahami bahwa tindakan ini bersifat permanen dan tidak dapat dibatalkan. Jejak audit akan disimpan.</span>
+            </label>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setCleanupModalSubmission(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleCleanupPermanent}
+                disabled={!cleanupConfirm || cleanupReason.trim().length < 5}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md transition cursor-pointer"
+              >
+                Hapus Permanen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Ekspor Excel */}
+      <ExportExcelModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        exams={exams}
+        schools={schoolsList}
+        classes={availableClasses}
+        submissions={submissions}
+        currentUser={currentUser}
+        initialSchoolId={selectedSchoolId}
+        initialClassId={selectedClassId}
+        initialExamId={selectedExamId !== 'ALL' ? selectedExamId : undefined}
+      />
     </div>
   );
 };

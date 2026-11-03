@@ -20,7 +20,7 @@ import {
   AuthenticatedRequest,
   AuthPayload,
 } from "./auth";
-import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
+import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem, SubmissionAuditLog } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
 import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
 export { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE, NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE };
@@ -34,6 +34,7 @@ import {
   StandardAIEvaluationResult
 } from "./aiEvaluationRouter";
 import { aiQueueManager } from "./aiEvaluationQueue";
+import { generateExamResultsExcelWorkbook } from "./services/excelExportService";
 
 
 export function reloadEnv(): void {
@@ -120,7 +121,7 @@ export function ensureConsistentInitialData(): void {
           sub.technicalScore = 0;
           sub.aiEvaluation = `Skor Total Non-Tes Employability: ${empRes.totalRawScore}/90 (${empRes.finalPercentage}% - Kategori ${empRes.category}). ${empRes.interpretation}`;
           sub.teacherFollowUp = `Pemeriksaan instrumen non-tes employability telah selesai sesuai rubrik 18 butir (skor 1-5 per respons). Kategori: ${empRes.category}.`;
-          
+
           // Re-order answers strictly sequentially 1 to 18
           const orderedAnswers: Record<string, any> = {};
           NON_TEST_QUESTIONS_18.forEach(q => {
@@ -185,18 +186,40 @@ ensureConsistentInitialData();
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 5000;
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const allowedOriginsList = CLIENT_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 
 // Middleware
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || origin === CLIENT_ORIGIN || origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) {
-        callback(null, true);
-      } else {
-        callback(null, true);
+      // 1. Izinkan request tanpa origin (seperti curl, mobile app, healthcheck container)
+      if (!origin) {
+        return callback(null, true);
       }
+
+      // 2. Izinkan origin yang didefinisikan dalam CLIENT_ORIGIN
+      if (allowedOriginsList.includes(origin)) {
+        return callback(null, true);
+      }
+
+      // 3. Izinkan seluruh preview dan production domain Vercel (*.vercel.app)
+      if (/^https:\/\/[a-zA-Z0-9_\-.]+\.vercel\.app$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      // 4. Izinkan local development
+      if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) {
+        return callback(null, true);
+      }
+
+      // Tolak origin yang tidak dikenal
+      console.warn(`[CORS] Akses ditolak dari origin tidak dikenal: ${origin}`);
+      return callback(new Error(`Akses CORS ditolak untuk origin: ${origin}`));
     },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Content-Disposition', 'X-Filename']
   })
 );
 
@@ -520,8 +543,8 @@ export function verifySubmissionTeacherAccess(
 
   // Cari kelas guru dari db.classes berdasarkan relasi otoritatif classes.teacherId
   const teacherUser = (db.users || []).find(u => u.id === user.userId || (u.email && user.email && u.email.toLowerCase() === user.email.toLowerCase()));
-  const teacherClasses = (db.classes || []).filter(c => 
-    c.teacherId === user.userId || 
+  const teacherClasses = (db.classes || []).filter(c =>
+    c.teacherId === user.userId ||
     (c.teacherName && user.name && c.teacherName.toLowerCase() === user.name.toLowerCase()) ||
     (teacherUser?.assignedClassIds && teacherUser.assignedClassIds.includes(c.id))
   );
@@ -566,7 +589,7 @@ export function verifySubmissionTeacherAccess(
   }
 
   // 3. Kelas-kelas dalam sekolah guru
-  const schoolClasses = (db.classes || []).filter(c => 
+  const schoolClasses = (db.classes || []).filter(c =>
     (user.schoolId && c.schoolId === user.schoolId) ||
     (user.schoolName && isSchoolMatchStrict(c.schoolName, user.schoolName))
   );
@@ -600,7 +623,7 @@ export function verifySubmissionTeacherAccess(
   }
 
   // 4. Relasi Siswa Terverifikasi di db.users (NIS / ID / Email)
-  const student = (db.users || []).find(u => 
+  const student = (db.users || []).find(u =>
     (sub.studentId && u.id === sub.studentId) ||
     (sub.studentNis && u.identityNo && u.identityNo === sub.studentNis) ||
     (sub.studentEmail && u.email && u.email.toLowerCase() === sub.studentEmail.toLowerCase())
@@ -609,7 +632,7 @@ export function verifySubmissionTeacherAccess(
     const isStudentSchool = (student.schoolId && user.schoolId && student.schoolId === user.schoolId) ||
       (student.schoolName && user.schoolName && isSchoolMatchStrict(student.schoolName, user.schoolName));
     if (isStudentSchool) {
-      const studentClass = student.classId 
+      const studentClass = student.classId
         ? (db.classes || []).find(c => c.id === student.classId)
         : (student.className ? (db.classes || []).find(c => c.name.toLowerCase().trim() === student.className?.toLowerCase()?.trim()) : undefined);
       return {
@@ -789,7 +812,7 @@ app.get("/api/dashboard/summary", optionalAuth, (req: AuthenticatedRequest, res:
       (user.schoolName && isSchoolMatchStrict(e.schoolName, user.schoolName))
     );
 
-    const mySubmissions = (db.submissions || []).filter(sub => 
+    const mySubmissions = (db.submissions || []).filter(sub =>
       verifySubmissionTeacherAccess(sub, user, db).authorized
     );
 
@@ -994,6 +1017,12 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       teacherFollowUp: s.teacherFollowUp,
       evidences: safeEvidences,
       evidenceCount: safeEvidences.length,
+      // Status Arsip & Soft-Delete (Fitur 1)
+      isArchived: Boolean(s.isArchived || s.deletedAt),
+      archivedAt: s.archivedAt || s.deletedAt,
+      archivedBy: s.archivedBy,
+      archiveReason: s.archiveReason,
+      deletedAt: s.deletedAt,
       needsReconciliation: req.user?.role === 'admin' ? (!effectiveSchoolId && !effectiveSchoolName) : undefined,
       // Jawaban rincian: Siswa hanya menerima miliknya sendiri tanpa Base64. Guru/Admin mengambil detail per-submission on-demand via GET /api/submissions/:id
       answers: safeStudentAnswers,
@@ -1423,7 +1452,7 @@ app.get("/api/teachers", requireAuth, requireRole("admin", "guru"), (_req: Authe
 app.post("/api/teachers", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
   const db = getDb();
   const newTeacher: Teacher = req.body;
-  
+
   // Upsert in teachers list
   const existingTeacherIdx = db.teachers.findIndex((t) => t.id === newTeacher.id || t.email.toLowerCase() === newTeacher.email.toLowerCase());
   if (existingTeacherIdx >= 0) {
@@ -1545,7 +1574,7 @@ app.post("/api/packages", requireAuth, requireRole("admin", "guru"), (req: Authe
   }
   newPkg.version = 1;
   newPkg.totalQuestions = Array.isArray(newPkg.questions) ? newPkg.questions.length : 0;
-  
+
   // Periksa apakah ID sudah ada
   const existingIdx = db.packages.findIndex(p => p.id === newPkg.id);
   if (existingIdx >= 0) {
@@ -1818,7 +1847,7 @@ app.post("/api/exams", requireAuth, requireRole("admin", "guru"), (req: Authenti
   newExam.category = pkg.category;
   newExam.packageVersion = pkg.version || 1;
   newExam.durationMinutes = newExam.durationMinutes || pkg.durationMinutes || 60;
-  
+
   // Kunci snapshot butir soal pada saat ujian dijadwalkan
   if (!newExam.questionSnapshot || newExam.questionSnapshot.length === 0) {
     newExam.questionSnapshot = Array.isArray(pkg.questions) ? JSON.parse(JSON.stringify(pkg.questions)) : [];
@@ -1919,7 +1948,19 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
   const db = getDb();
   let list = [...(db.submissions || [])];
 
-  const { page = "1", limit = "20", examId, studentId, schoolName, status, search } = req.query;
+  const {
+    page = "1",
+    limit = "20",
+    examId,
+    studentId,
+    schoolId,
+    schoolName,
+    classId,
+    status,
+    gradingStatus,
+    archiveStatus = "active",
+    search
+  } = req.query;
 
   // Isolasi data: Siswa HANYA dapat melihat data submission miliknya sendiri
   if (req.user?.role === "siswa") {
@@ -1934,11 +1975,40 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
     list = list.filter(s => verifySubmissionTeacherAccess(s, req.user!, db).authorized);
   }
 
+  // Filter Status Arsip (Kebutuhan Fitur 1: Default adalah "active", submission diarsipkan tidak muncul secara default)
+  if (archiveStatus === "archived") {
+    list = list.filter(s => s.isArchived || !!s.deletedAt);
+  } else if (archiveStatus === "all") {
+    // Tampilkan semua (aktif dan arsip)
+  } else {
+    // "active" (default)
+    list = list.filter(s => !s.isArchived && !s.deletedAt);
+  }
+
   // Filter query params
   if (examId) list = list.filter(s => s.examId === examId);
-  if (studentId && req.user?.role !== "siswa") list = list.filter(s => s.studentId === studentId);
-  if (schoolName && req.user?.role === "admin") list = list.filter(s => s.schoolName?.toLowerCase() === String(schoolName).toLowerCase());
+  if (studentId && req.user?.role !== "siswa") {
+    list = list.filter(s => s.studentId === studentId || s.studentNis === studentId);
+  }
+  if (classId) {
+    list = list.filter(s => s.classId === classId || (s.className && db.classes?.find(c => c.id === classId)?.name.toLowerCase().trim() === s.className.toLowerCase().trim()));
+  }
+  if (schoolId) {
+    list = list.filter(s => s.schoolId === schoolId);
+  }
+  if (schoolName && req.user?.role === "admin") {
+    list = list.filter(s => s.schoolName?.toLowerCase() === String(schoolName).toLowerCase());
+  }
   if (status) list = list.filter(s => s.status === status);
+  if (gradingStatus) {
+    if (gradingStatus === "dinilai") {
+      list = list.filter(s => (s.status === "dinilai" || s.validationStatus === "approved" || s.validationStatus === "revised") && !s.hasPendingComponents);
+    } else if (gradingStatus === "perlu_pemeriksaan") {
+      list = list.filter(s => s.status === "perlu_pemeriksaan" || s.requiresTeacherReview || s.hasPendingComponents);
+    } else if (gradingStatus === "pending_ai") {
+      list = list.filter(s => s.aiGradingStatus === "pending" || s.aiGradingStatus === "processing");
+    }
+  }
   if (search) {
     const q = String(search).toLowerCase();
     list = list.filter(s =>
@@ -1966,6 +2036,11 @@ app.get("/api/submissions", requireAuth, (req: AuthenticatedRequest, res: Respon
       : [];
     return {
       ...light,
+      isArchived: Boolean(s.isArchived || s.deletedAt),
+      archivedAt: s.archivedAt || s.deletedAt,
+      archivedBy: s.archivedBy,
+      archiveReason: s.archiveReason,
+      deletedAt: s.deletedAt,
       evidences: cleanEvs,
       evidenceCount: cleanEvs.length,
     };
@@ -2032,6 +2107,408 @@ app.get("/api/submissions/:id", requireAuth, (req: AuthenticatedRequest, res: Re
   });
 });
 
+// Helper: Pencatatan Audit Trail Pengelolaan Submission
+export function recordSubmissionAuditLog(log: Omit<SubmissionAuditLog, 'id' | 'createdAt'>): SubmissionAuditLog {
+  const db = getDb();
+  db.submissionAuditLogs = db.submissionAuditLogs || [];
+  const entry: SubmissionAuditLog = {
+    id: `sub-audit-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+    ...log,
+    createdAt: new Date().toISOString(),
+  };
+  db.submissionAuditLogs.unshift(entry);
+  return entry;
+}
+
+// 2a. POST /api/submissions/:id/archive: Arsipkan Submission (Soft-Delete)
+app.post("/api/submissions/:id/archive", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { id } = req.params;
+  const sub = (db.submissions || []).find(s => s.id === id);
+
+  if (!sub) {
+    return res.status(404).json({ success: false, error: "Submission hasil ujian tidak ditemukan." });
+  }
+
+  // Otorisasi Guru: Guru hanya boleh mengarsipkan submission yang menjadi kewenangannya
+  if (req.user?.role === 'guru') {
+    const auth = verifySubmissionTeacherAccess(sub, req.user, db);
+    if (!auth.authorized) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Anda tidak memiliki wewenang untuk mengarsipkan submission di luar sekolah/kelas binaan Anda."
+      });
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  sub.isArchived = true;
+  sub.archivedAt = nowIso;
+  sub.archivedBy = req.user?.name || req.user?.userId;
+  sub.archiveReason = req.body?.reason || "Diarsipkan oleh guru/admin";
+  sub.deletedAt = nowIso;
+
+  // Batalkan pekerjaan AI Queue jika sedang mengantre
+  aiQueueManager.cancelJobsForSubmission(sub.id);
+
+  // Catat Audit Trail
+  recordSubmissionAuditLog({
+    submissionId: sub.id,
+    action: 'archive',
+    performedBy: req.user?.name || req.user?.userId || 'unknown',
+    userRole: req.user?.role || 'guru',
+    schoolId: sub.schoolId || req.user?.schoolId,
+    reason: sub.archiveReason,
+    metadata: {
+      studentName: sub.studentName,
+      studentNis: sub.studentNis,
+      examTitle: sub.examTitle,
+      totalScore: sub.totalScore
+    }
+  });
+
+  saveDb();
+  res.json({
+    success: true,
+    message: "Submission berhasil diarsipkan.",
+    submission: sub
+  });
+});
+
+// 2b. POST /api/submissions/:id/restore: Pulihkan Submission dari Arsip
+app.post("/api/submissions/:id/restore", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { id } = req.params;
+  const sub = (db.submissions || []).find(s => s.id === id);
+
+  if (!sub) {
+    return res.status(404).json({ success: false, error: "Submission hasil ujian tidak ditemukan." });
+  }
+
+  // Otorisasi Guru
+  if (req.user?.role === 'guru') {
+    const auth = verifySubmissionTeacherAccess(sub, req.user, db);
+    if (!auth.authorized) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Anda tidak memiliki wewenang untuk memulihkan submission ini."
+      });
+    }
+  }
+
+  sub.isArchived = false;
+  sub.archivedAt = undefined;
+  sub.archivedBy = undefined;
+  sub.archiveReason = undefined;
+  sub.deletedAt = undefined;
+
+  // Catat Audit Trail
+  recordSubmissionAuditLog({
+    submissionId: sub.id,
+    action: 'restore',
+    performedBy: req.user?.name || req.user?.userId || 'unknown',
+    userRole: req.user?.role || 'guru',
+    schoolId: sub.schoolId || req.user?.schoolId,
+    reason: req.body?.reason || "Dipulihkan dari arsip",
+    metadata: {
+      studentName: sub.studentName,
+      examTitle: sub.examTitle
+    }
+  });
+
+  saveDb();
+  res.json({
+    success: true,
+    message: "Submission berhasil dipulihkan dari arsip.",
+    submission: sub
+  });
+});
+
+// 2c. POST /api/submissions/bulk-archive: Arsipkan Banyak Submission Sekaligus (Bulk)
+app.post("/api/submissions/bulk-archive", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { submissionIds, reason } = req.body;
+
+  if (!Array.isArray(submissionIds) || submissionIds.length === 0) {
+    return res.status(400).json({ success: false, error: "Daftar submissionIds wajib berupa array dan tidak boleh kosong." });
+  }
+
+  const processed: string[] = [];
+  const errors: Array<{ id: string; error: string }> = [];
+  const nowIso = new Date().toISOString();
+
+  for (const id of submissionIds) {
+    const sub = (db.submissions || []).find(s => s.id === id);
+    if (!sub) {
+      errors.push({ id, error: "Submission tidak ditemukan" });
+      continue;
+    }
+
+    if (req.user?.role === 'guru') {
+      const auth = verifySubmissionTeacherAccess(sub, req.user, db);
+      if (!auth.authorized) {
+        errors.push({ id, error: "Di luar kewenangan guru" });
+        continue;
+      }
+    }
+
+    sub.isArchived = true;
+    sub.archivedAt = nowIso;
+    sub.archivedBy = req.user?.name || req.user?.userId;
+    sub.archiveReason = reason || "Diarsipkan massal oleh guru/admin";
+    sub.deletedAt = nowIso;
+
+    aiQueueManager.cancelJobsForSubmission(sub.id);
+
+    recordSubmissionAuditLog({
+      submissionId: sub.id,
+      action: 'archive',
+      performedBy: req.user?.name || req.user?.userId || 'unknown',
+      userRole: req.user?.role || 'guru',
+      schoolId: sub.schoolId || req.user?.schoolId,
+      reason: sub.archiveReason,
+      metadata: { bulk: true, studentName: sub.studentName, examTitle: sub.examTitle }
+    });
+
+    processed.push(sub.id);
+  }
+
+  if (processed.length > 0) {
+    saveDb();
+  }
+
+  res.json({
+    success: true,
+    count: processed.length,
+    processed,
+    errors,
+    totalRequested: submissionIds.length
+  });
+});
+
+// 2d. POST /api/submissions/bulk-restore: Pulihkan Banyak Submission Sekaligus
+app.post("/api/submissions/bulk-restore", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { submissionIds } = req.body;
+
+  if (!Array.isArray(submissionIds) || submissionIds.length === 0) {
+    return res.status(400).json({ success: false, error: "Daftar submissionIds wajib berupa array dan tidak boleh kosong." });
+  }
+
+  const processed: string[] = [];
+  const errors: Array<{ id: string; error: string }> = [];
+
+  for (const id of submissionIds) {
+    const sub = (db.submissions || []).find(s => s.id === id);
+    if (!sub) {
+      errors.push({ id, error: "Submission tidak ditemukan" });
+      continue;
+    }
+
+    if (req.user?.role === 'guru') {
+      const auth = verifySubmissionTeacherAccess(sub, req.user, db);
+      if (!auth.authorized) {
+        errors.push({ id, error: "Di luar kewenangan guru" });
+        continue;
+      }
+    }
+
+    sub.isArchived = false;
+    sub.archivedAt = undefined;
+    sub.archivedBy = undefined;
+    sub.archiveReason = undefined;
+    sub.deletedAt = undefined;
+
+    recordSubmissionAuditLog({
+      submissionId: sub.id,
+      action: 'restore',
+      performedBy: req.user?.name || req.user?.userId || 'unknown',
+      userRole: req.user?.role || 'guru',
+      schoolId: sub.schoolId || req.user?.schoolId,
+      reason: "Dipulihkan massal dari arsip",
+      metadata: { bulk: true, studentName: sub.studentName }
+    });
+
+    processed.push(sub.id);
+  }
+
+  if (processed.length > 0) {
+    saveDb();
+  }
+
+  res.json({
+    success: true,
+    count: processed.length,
+    processed,
+    errors,
+    totalRequested: submissionIds.length
+  });
+});
+
+// 2e. POST /api/submissions/:id/cleanup: Cleanup Permanen Khusus Admin (Audit-Controlled Prosedur)
+app.post("/api/submissions/:id/cleanup", requireAuth, requireRole("admin"), (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  const { id } = req.params;
+  const { confirmation, reason } = req.body;
+
+  // Kebijakan Kontrol Ketat: Hanya Admin, wajib konfirmasi boolean eksplisit, dan alasan minimal 5 karakter
+  if (!confirmation) {
+    return res.status(400).json({
+      success: false,
+      error: "Konfirmasi eksplisit (confirmation: true) diperlukan untuk prosedur pembersihan artefak permanen."
+    });
+  }
+
+  if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+    return res.status(400).json({
+      success: false,
+      error: "Alasan penghapusan permanen artefak pengujian wajib diisi minimal 5 karakter untuk audit trail."
+    });
+  }
+
+  const idx = (db.submissions || []).findIndex(s => s.id === id);
+  if (idx < 0) {
+    return res.status(404).json({ success: false, error: "Submission artefak tidak ditemukan." });
+  }
+
+  const targetSub = db.submissions[idx];
+
+  // Catat Audit Trail lengkap sebelum penghapusan permanen dilakukan
+  recordSubmissionAuditLog({
+    submissionId: targetSub.id,
+    action: 'cleanup_permanent',
+    performedBy: req.user?.name || req.user?.userId || 'admin',
+    userRole: 'admin',
+    schoolId: targetSub.schoolId,
+    reason: reason.trim(),
+    metadata: {
+      deletedSnapshot: {
+        studentName: targetSub.studentName,
+        studentNis: targetSub.studentNis,
+        examId: targetSub.examId,
+        examTitle: targetSub.examTitle,
+        totalScore: targetSub.totalScore,
+        submitTime: targetSub.submitTime
+      }
+    }
+  });
+
+  // Hapus dari antrean AI jika masih ada
+  aiQueueManager.cancelJobsForSubmission(targetSub.id);
+
+  // Hapus permanen dari db.submissions
+  db.submissions.splice(idx, 1);
+  saveDb();
+
+  res.json({
+    success: true,
+    message: "Submission artefak pengujian berhasil dibersihkan secara permanen."
+  });
+});
+
+// 2f. GET /api/submissions/audit-logs: Audit Trail Pengelolaan Submission
+app.get("/api/submissions-audit-logs", requireAuth, requireRole("admin", "guru"), (req: AuthenticatedRequest, res: Response) => {
+  const db = getDb();
+  let logs = [...(db.submissionAuditLogs || [])];
+
+  if (req.user?.role === 'guru' && req.user.schoolId) {
+    logs = logs.filter(l => !l.schoolId || l.schoolId === req.user?.schoolId);
+  }
+
+  res.json({ success: true, logs });
+});
+
+// 2g. GET /api/exams/:id/export-excel: Ekspor Hasil Ujian ke Format Excel (.xlsx) Profesional
+app.get("/api/exams/:id/export-excel", requireAuth, requireRole("admin", "guru"), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const { id: examId } = req.params;
+    const { classId, includeArchived = 'false', attemptsMode = 'latest' } = req.query;
+
+    const exam = (db.exams || []).find(e => e.id === examId);
+    if (!exam) {
+      return res.status(404).json({ success: false, error: "Ujian tidak ditemukan." });
+    }
+
+    // Otorisasi Guru: Guru hanya dapat mengekspor ujian yang menjadi kewenangannya
+    if (req.user?.role === 'guru') {
+      const guruSchool = (db.schools || []).find(s => s.id === req.user?.schoolId || s.name === req.user?.schoolName);
+      const isExamInSchool = !exam.schoolId || (guruSchool && exam.schoolId === guruSchool.id) || (req.user.schoolName && exam.schoolName && exam.schoolName.toLowerCase() === req.user.schoolName.toLowerCase());
+      if (!isExamInSchool) {
+        return res.status(403).json({
+          success: false,
+          error: "Akses ditolak: Anda tidak memiliki wewenang untuk mengekspor hasil ujian dari sekolah lain."
+        });
+      }
+    }
+
+    // Resolusi Soal Ujian (Snapshot atau Paket)
+    let questions: QuestionItem[] = [];
+    if (Array.isArray(exam.questionSnapshot) && exam.questionSnapshot.length > 0) {
+      questions = exam.questionSnapshot;
+    } else {
+      const pkg = (db.packages || []).find(p => p.id === exam.packageId);
+      if (pkg && Array.isArray(pkg.questions) && pkg.questions.length > 0) {
+        questions = pkg.questions;
+      }
+    }
+
+    // Ambil submission untuk ujian ini
+    let examSubmissions = (db.submissions || []).filter(s => s.examId === exam.id);
+
+    // Filter Kelas jika dipilih
+    let selectedClassName = exam.className;
+    if (classId && classId !== 'ALL') {
+      const targetClass = (db.classes || []).find(c => c.id === classId);
+      if (targetClass) {
+        selectedClassName = targetClass.name;
+        examSubmissions = examSubmissions.filter(s =>
+          s.classId === targetClass.id ||
+          (s.className && s.className.toLowerCase().trim() === targetClass.name.toLowerCase().trim())
+        );
+      } else {
+        examSubmissions = examSubmissions.filter(s => s.classId === classId);
+      }
+    }
+
+    // Filter Otoritas Guru per submission
+    if (req.user?.role === 'guru') {
+      examSubmissions = examSubmissions.filter(s => verifySubmissionTeacherAccess(s, req.user!, db).authorized);
+    }
+
+    // Jika questions masih kosong, coba ambil dari snapshot submission pertama jika ada
+    if (questions.length === 0 && examSubmissions.length > 0 && Array.isArray(examSubmissions[0].questionSnapshot) && examSubmissions[0].questionSnapshot.length > 0) {
+      questions = examSubmissions[0].questionSnapshot;
+    }
+
+    // Fallback paket default jika masih kosong
+    if (questions.length === 0) {
+      questions = exam.category === 'employability' ? NON_TEST_QUESTIONS_18 : REVISED_QUESTIONS_24;
+    }
+
+    const { workbook, filename } = await generateExamResultsExcelWorkbook({
+      exam,
+      questions,
+      submissions: examSubmissions,
+      className: selectedClassName,
+      schoolName: exam.schoolName,
+      teacherName: req.user?.name || exam.teacherName,
+      includeArchived: includeArchived === 'true',
+      attemptsMode: attemptsMode === 'all' ? 'all' : 'latest'
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Filename', filename);
+    return res.send(Buffer.from(buffer));
+  } catch (err: any) {
+    console.error('[Export Excel] Gagal membuat file XLSX:', err);
+    return res.status(500).json({ success: false, error: `Gagal mengekspor data Excel: ${err?.message || err}` });
+  }
+});
+
 // 3. POST /api/exams/:id/draft: Simpan Draft Jawaban Siswa di Server (WAJIB AUTH & ISOLASI SEKOLAH)
 app.post("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb() as any;
@@ -2087,7 +2564,7 @@ app.get("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Re
       });
     }
   }
-  
+
   if (req.user?.role === 'siswa') {
     const requestedNis = req.query.studentNis as string | undefined;
     const requestedId = req.query.studentId as string | undefined;
@@ -3897,7 +4374,7 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
       try {
         const base64Data = fileData.replace(/^data:[^;]+;base64,/, "");
         const fileBuffer = Buffer.from(base64Data, "base64");
-        
+
         // SHA-256 Hash untuk ketertelusuran (traceability) & integritas audit
         fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 

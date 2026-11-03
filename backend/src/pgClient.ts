@@ -11,7 +11,11 @@ export function getPool(): pg.Pool {
   if (!_pool) {
     const connectionString = process.env.DATABASE_URL;
     if (connectionString) {
-      _pool = new Pool({ connectionString });
+      _pool = new Pool({
+        connectionString,
+        ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+        options: '-c search_path=employa,public'
+      });
     } else {
       _pool = new Pool({
         host:     process.env.DB_HOST     || 'localhost',
@@ -19,7 +23,8 @@ export function getPool(): pg.Pool {
         database: process.env.DB_NAME     || 'asesmen_smk',
         user:     process.env.DB_USER     || 'postgres',
         password: process.env.DB_PASSWORD || '',
-        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+        ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+        options: '-c search_path=employa,public'
       });
     }
 
