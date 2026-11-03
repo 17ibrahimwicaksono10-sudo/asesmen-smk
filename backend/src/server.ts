@@ -186,6 +186,26 @@ export function ensureConsistentInitialData(): void {
         }
       }
     });
+
+    // Pastikan submission teknis kimia 24 soal memiliki agregasi otoritatif 6 dimensi
+    db.submissions.forEach(sub => {
+      const examObj = db.exams?.find(e => e.id === sub.examId);
+      const isTech = examObj?.packageId === 'pkg-full-24'
+        || examObj?.category === 'teknis_kimia'
+        || sub.examTitle?.toLowerCase().includes('teknis')
+        || sub.examTitle?.toLowerCase().includes('kimia')
+        || Object.keys(sub.answers || {}).some(k => k.startsWith('q-k3lh') || k.startsWith('q-pa') || k.startsWith('q-st') || k.startsWith('q-av') || k.startsWith('q-id') || k.startsWith('q-mm'));
+
+      if (isTech && sub.answers && (!sub.dimensionScores || Object.keys(sub.dimensionScores).length < 6)) {
+        const canonicalQuestions = (Array.isArray(sub.questionSnapshot) && sub.questionSnapshot.length === 24)
+          ? sub.questionSnapshot
+          : ((Array.isArray(examObj?.questionSnapshot) && examObj.questionSnapshot.length === 24)
+            ? examObj.questionSnapshot
+            : REVISED_QUESTIONS_24);
+        evaluateSubmissionServerSide(sub, canonicalQuestions);
+        changed = true;
+      }
+    });
   }
 
   if (changed) {
@@ -1016,6 +1036,7 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       employabilityScore: s.employabilityScore,
       rawScoreTotal: s.rawScoreTotal,
       maxRawScore: s.maxRawScore,
+      dimensionScores: s.dimensionScores,
       originalAIScoreTotal: s.originalAIScoreTotal,
       teacherScoreTotal: s.teacherScoreTotal,
       status: s.status,
@@ -2875,6 +2896,7 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
         : (isComplexMCQ && qAns.selectedOption ? [qAns.selectedOption] : undefined),
       score: finalScore,
       maxScore: qMax,
+      isCorrect: typeof finalScore === 'number' ? (finalScore === qMax) : undefined,
       isPendingEvaluation: isPending
     };
   });
@@ -2902,6 +2924,42 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
   } else {
     submission.technicalScore = finalPercentage;
     submission.employabilityScore = 0;
+
+    // 6. Hitung Skor Agregasi Otoritatif 6 Dimensi KTK untuk Tes Kemampuan Teknis Kimia
+    const dimensionScores: Record<string, { raw: number; max: number; percentage: number; name: string }> = {
+      k3lh: { raw: 0, max: 10, percentage: 0, name: 'K3LH dan Regulasi' },
+      persiapan_analisis: { raw: 0, max: 10, percentage: 0, name: 'Persiapan Analisis' },
+      stoikiometri: { raw: 0, max: 10, percentage: 0, name: 'Stoikiometri Terapan' },
+      volumetri: { raw: 0, max: 13, percentage: 0, name: 'Analisis Volumetri' },
+      instrumentasi: { raw: 0, max: 11, percentage: 0, name: 'Instrumentasi Dasar' },
+      manajemen_mutu: { raw: 0, max: 11, percentage: 0, name: 'Manajemen Mutu Laboratorium' }
+    };
+
+    canonicalQuestions.forEach((q, idx) => {
+      let dimId = q.dimensionId;
+      if (!dimId) {
+        const num = q.number || (idx + 1);
+        if (num >= 1 && num <= 4) dimId = 'k3lh';
+        else if (num >= 5 && num <= 8) dimId = 'persiapan_analisis';
+        else if (num >= 9 && num <= 12) dimId = 'stoikiometri';
+        else if (num >= 13 && num <= 16) dimId = 'volumetri';
+        else if (num >= 17 && num <= 20) dimId = 'instrumentasi';
+        else if (num >= 21 && num <= 24) dimId = 'manajemen_mutu';
+      }
+
+      if (dimId && dimensionScores[dimId]) {
+        const ans = enrichedAnswers[q.id];
+        const qScore = (ans && typeof ans.score === 'number') ? ans.score : 0;
+        dimensionScores[dimId].raw += qScore;
+      }
+    });
+
+    Object.keys(dimensionScores).forEach(dimKey => {
+      const dim = dimensionScores[dimKey];
+      dim.percentage = dim.max > 0 ? Math.round((dim.raw / dim.max) * 100) : 0;
+    });
+
+    submission.dimensionScores = dimensionScores;
   }
 
   const hasSubjective = canonicalQuestions.some(q => ['essay', 'analisis_kasus', 'scenario_assessment', 'short_answer', 'essay_subquestions'].includes(q.type));
@@ -3156,6 +3214,23 @@ app.put("/api/submissions/:id", requireAuth, requireRole("admin", "guru"), (req:
     updated.hasPendingComponents = false;
     updated.requiresTeacherReview = false;
   }
+
+  // Recalculate dimension scores and totals consistently
+  const exam = db.exams?.find(e => e.id === updated.examId);
+  let canonicalQuestions: QuestionItem[] = [];
+  if (Array.isArray(updated.questionSnapshot) && updated.questionSnapshot.length > 0) {
+    canonicalQuestions = updated.questionSnapshot;
+  } else if (Array.isArray(exam?.questionSnapshot) && exam.questionSnapshot.length > 0) {
+    canonicalQuestions = exam.questionSnapshot;
+  } else {
+    const pkg = db.packages?.find(p => p.id === (updated.packageId || exam?.packageId));
+    if (pkg?.questions && pkg.questions.length > 0) {
+      canonicalQuestions = pkg.questions;
+    } else {
+      canonicalQuestions = REVISED_QUESTIONS_24;
+    }
+  }
+  evaluateSubmissionServerSide(updated, canonicalQuestions);
 
   const idx = db.submissions.findIndex((s) => s.id === id);
   if (idx >= 0) {
@@ -5552,6 +5627,13 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
-export { app };
+export { app, aiQueueManager };
+export {
+  sanitizeExcelFormula,
+  formatStudentAnswerText,
+  formatQuestionFeedback,
+  formatAuthoritativeTotalScore,
+  generateExamResultsExcelWorkbook
+} from './services/excelExportService';
 export default app;
 

@@ -58,7 +58,7 @@ CREATE POLICY teacher_select_submission_audit_logs ON employa.submission_audit_l
     USING (
         employa.is_verified_teacher()
         AND school_id IS NOT NULL
-        AND school_id = employa.get_verified_user_school_id()
+        AND school_id = employa.get_verified_school_id()
     );
 
 -- Policy: Guru dapat mencatat audit log untuk sekolahnya
@@ -69,7 +69,7 @@ CREATE POLICY teacher_insert_submission_audit_logs ON employa.submission_audit_l
     WITH CHECK (
         employa.is_verified_teacher()
         AND school_id IS NOT NULL
-        AND school_id = employa.get_verified_user_school_id()
+        AND school_id = employa.get_verified_school_id()
         AND user_role = 'guru'
         AND action IN ('archive', 'restore')
     );

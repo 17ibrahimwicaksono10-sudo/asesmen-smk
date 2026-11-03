@@ -13,16 +13,28 @@
 //   9. Bulk Archive & Bulk Restore Operation
 //  10. Teacher & Admin Authorization Enforcement (Cross-tenant denial, Admin cleanup only)
 // =============================================================================
+process.env.DISABLE_SERVER_LISTEN = 'true';
 
 import ExcelJS from 'exceljs';
-import {
+import fs from 'fs';
+import http from 'http';
+import { spawn } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const SERVER_DIST_PATH = path.resolve(__dirname, '../dist/server.js');
+
+const serverModule = await import(`file://${SERVER_DIST_PATH}`);
+const {
   sanitizeExcelFormula,
   formatStudentAnswerText,
   formatQuestionFeedback,
   formatAuthoritativeTotalScore,
-  generateExamResultsExcelWorkbook
-} from './services/excelExportService.ts';
-import { aiQueueManager } from './aiEvaluationQueue.ts';
+  generateExamResultsExcelWorkbook,
+  aiQueueManager
+} = serverModule;
 
 let passed = 0;
 let failed = 0;
@@ -410,6 +422,377 @@ async function runTests() {
     // Filter "all"
     const allItems = dataset.filter(() => true);
     assert(allItems.length === 4, 'All filter returns all 4 items');
+  }
+
+  // -------------------------------------------------------------------------
+  // TEST GROUP 9: HTTP INTEGRATION TESTS (REAL EXPRESS SERVER)
+  // -------------------------------------------------------------------------
+  console.log('\n--- TEST GROUP 9: HTTP Endpoint Integration Tests ---');
+  const HTTP_TEST_PORT = 5077;
+  const HTTP_BASE_URL = `http://127.0.0.1:${HTTP_TEST_PORT}`;
+  const SYNTH_DIR = path.resolve(__dirname, '../data/synthetic_sub_export');
+  const SYNTH_DB_PATH = path.join(SYNTH_DIR, 'database.json');
+
+  if (!fs.existsSync(SYNTH_DIR)) {
+    fs.mkdirSync(SYNTH_DIR, { recursive: true });
+  }
+
+  const synthQuestions = Array.from({ length: 24 }, (_, i) => ({
+    id: `q-synth-${i + 1}`,
+    questionNumber: i + 1,
+    type: i % 2 === 0 ? 'multiple_choice' : 'essay',
+    questionText: `Pertanyaan ke-${i + 1} sintetik`,
+    maxScore: 5
+  }));
+
+  const synthAnswers = {};
+  synthQuestions.forEach((q, idx) => {
+    synthAnswers[q.id] = {
+      questionId: q.id,
+      answer: idx % 2 === 0 ? 'Pilihan A' : 'Jawaban esai terstruktur',
+      score: 4,
+      maxScore: 5,
+      isCorrect: idx % 2 === 0 ? true : undefined,
+      teacherFeedback: 'Catatan guru'
+    };
+  });
+
+  const initialSynthDb = {
+    users: [
+      {
+        id: 'usr-admin-export',
+        name: 'Super Administrator',
+        email: 'admin@export.test',
+        password: 'password123',
+        role: 'admin',
+        schoolId: 'sch-alpha',
+        schoolName: 'SMK Negeri 1 Alpha',
+        status: 'active'
+      },
+      {
+        id: 'usr-teacher-a',
+        name: 'Guru Sekolah Alpha',
+        email: 'teacher.a@export.test',
+        password: 'password123',
+        role: 'guru',
+        schoolId: 'sch-alpha',
+        schoolName: 'SMK Negeri 1 Alpha',
+        status: 'active'
+      },
+      {
+        id: 'usr-teacher-b',
+        name: 'Guru Sekolah Beta',
+        email: 'teacher.b@export.test',
+        password: 'password123',
+        role: 'guru',
+        schoolId: 'sch-beta',
+        schoolName: 'SMK Negeri 2 Beta',
+        status: 'active'
+      },
+      {
+        id: 'usr-student-a1',
+        name: 'Siswa Alpha Satu',
+        email: 'student.a1@export.test',
+        password: 'password123',
+        role: 'siswa',
+        schoolId: 'sch-alpha',
+        schoolName: 'SMK Negeri 1 Alpha',
+        classId: 'cls-alpha-12',
+        className: 'XII Kimia Alpha',
+        identityNo: 'NIS-A001',
+        status: 'active'
+      }
+    ],
+    schools: [
+      { id: 'sch-alpha', name: 'SMK Negeri 1 Alpha' },
+      { id: 'sch-beta', name: 'SMK Negeri 2 Beta' }
+    ],
+    classes: [
+      { id: 'cls-alpha-12', schoolId: 'sch-alpha', name: 'XII Kimia Alpha' },
+      { id: 'cls-beta-12', schoolId: 'sch-beta', name: 'XII Kimia Beta' }
+    ],
+    packages: [
+      {
+        id: 'pkg-export-test',
+        title: 'Paket Uji Coba Export',
+        category: 'teknis_kimia',
+        questions: synthQuestions
+      }
+    ],
+    exams: [
+      {
+        id: 'exam-export-alpha',
+        schoolId: 'sch-alpha',
+        schoolName: 'SMK Negeri 1 Alpha',
+        classId: 'cls-alpha-12',
+        className: 'XII Kimia Alpha',
+        packageId: 'pkg-export-test',
+        title: 'Ujian Praktik Kimia Alpha',
+        status: 'selesai',
+        totalQuestions: 24,
+        targetScore: 75,
+        durationMinutes: 90
+      },
+      {
+        id: 'exam-export-beta',
+        schoolId: 'sch-beta',
+        schoolName: 'SMK Negeri 2 Beta',
+        classId: 'cls-beta-12',
+        className: 'XII Kimia Beta',
+        packageId: 'pkg-export-test',
+        title: 'Ujian Kimia Beta',
+        status: 'selesai',
+        totalQuestions: 24,
+        targetScore: 75,
+        durationMinutes: 90
+      }
+    ],
+    submissions: [
+      {
+        id: 'sub-alpha-01',
+        examId: 'exam-export-alpha',
+        examTitle: 'Ujian Praktik Kimia Alpha',
+        studentId: 'usr-student-a1',
+        studentName: 'Siswa Alpha Satu',
+        studentNis: 'NIS-A001',
+        schoolId: 'sch-alpha',
+        classId: 'cls-alpha-12',
+        className: 'XII Kimia Alpha',
+        status: 'dinilai',
+        autoScore: 32,
+        teacherFinalScore: 85,
+        validationStatus: 'approved',
+        isScoreFinal: true,
+        answers: synthAnswers,
+        submitTime: '2026-11-03T10:00:00Z',
+        isArchived: false,
+        deletedAt: null
+      },
+      {
+        id: 'sub-alpha-02',
+        examId: 'exam-export-alpha',
+        examTitle: 'Ujian Praktik Kimia Alpha',
+        studentId: 'usr-student-a2',
+        studentName: 'Siswa Alpha Dua',
+        studentNis: 'NIS-A002',
+        schoolId: 'sch-alpha',
+        classId: 'cls-alpha-12',
+        className: 'XII Kimia Alpha',
+        status: 'dinilai',
+        autoScore: 30,
+        teacherFinalScore: 78,
+        validationStatus: 'approved',
+        isScoreFinal: true,
+        answers: synthAnswers,
+        submitTime: '2026-11-03T10:05:00Z',
+        isArchived: false,
+        deletedAt: null
+      },
+      {
+        id: 'sub-beta-01',
+        examId: 'exam-export-beta',
+        examTitle: 'Ujian Kimia Beta',
+        studentId: 'usr-student-b1',
+        studentName: 'Siswa Beta Satu',
+        studentNis: 'NIS-B001',
+        schoolId: 'sch-beta',
+        classId: 'cls-beta-12',
+        className: 'XII Kimia Beta',
+        status: 'dinilai',
+        autoScore: 28,
+        teacherFinalScore: 75,
+        validationStatus: 'approved',
+        isScoreFinal: true,
+        answers: synthAnswers,
+        submitTime: '2026-11-03T10:10:00Z',
+        isArchived: false,
+        deletedAt: null
+      }
+    ],
+    studentReadiness: [],
+    settings: {
+      deepseekApiKey: 'mock-key',
+      geminiApiKey: 'mock-key'
+    }
+  };
+
+  fs.writeFileSync(SYNTH_DB_PATH, JSON.stringify(initialSynthDb, null, 2), 'utf-8');
+
+  // Helper HTTP request
+  function httpRequest(method, urlPath, headers = {}, body = null) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(urlPath, HTTP_BASE_URL);
+      const reqHeaders = { ...headers };
+      let bodyData = null;
+      if (body) {
+        bodyData = typeof body === 'string' ? body : JSON.stringify(body);
+        if (!reqHeaders['Content-Type']) reqHeaders['Content-Type'] = 'application/json';
+        reqHeaders['Content-Length'] = Buffer.byteLength(bodyData);
+      }
+
+      const req = http.request(url, { method, headers: reqHeaders }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          let json = null;
+          const contentType = res.headers['content-type'] || '';
+          if (contentType.includes('application/json')) {
+            try { json = JSON.parse(buffer.toString('utf-8')); } catch {}
+          }
+          resolve({ status: res.statusCode, headers: res.headers, buffer, json });
+        });
+      });
+      req.on('error', reject);
+      if (bodyData) req.write(bodyData);
+      req.end();
+    });
+  }
+
+  // Spawn HTTP server
+  let serverProc = null;
+  await new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      PORT: HTTP_TEST_PORT.toString(),
+      DISABLE_SERVER_LISTEN: 'false',
+      NODE_ENV: 'test',
+      JWT_SECRET: 'test_secret_for_export_and_archive_32chars',
+      AUTH_SECRET: 'test_secret_for_export_and_archive_32chars',
+      DATABASE_FILE: SYNTH_DB_PATH,
+      VOC_DATABASE_PATH: SYNTH_DB_PATH
+    };
+
+    serverProc = spawn(process.execPath, [SERVER_DIST_PATH], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let isStarted = false;
+    serverProc.stdout.on('data', d => {
+      const s = d.toString();
+      if (s.includes('Backend API Server running') && !isStarted) {
+        isStarted = true;
+        resolve();
+      }
+    });
+    serverProc.stderr.on('data', () => {});
+    serverProc.on('exit', code => {
+      if (!isStarted) reject(new Error(`Server exited early with code ${code}`));
+    });
+    setTimeout(() => {
+      if (!isStarted) { isStarted = true; resolve(); }
+    }, 4000);
+  });
+
+  try {
+    // 1. Authenticate users
+    const loginTeacherA = await httpRequest('POST', '/api/auth/login', {}, { email: 'teacher.a@export.test', password: 'password123' });
+    const tokenTeacherA = loginTeacherA.json?.token;
+    assert(loginTeacherA.status === 200 && !!tokenTeacherA, 'Teacher A authenticated successfully');
+
+    const loginTeacherB = await httpRequest('POST', '/api/auth/login', {}, { email: 'teacher.b@export.test', password: 'password123' });
+    const tokenTeacherB = loginTeacherB.json?.token;
+    assert(loginTeacherB.status === 200 && !!tokenTeacherB, 'Teacher B authenticated successfully');
+
+    const loginStudentA = await httpRequest('POST', '/api/auth/login', {}, { email: 'student.a1@export.test', password: 'password123' });
+    const tokenStudentA = loginStudentA.json?.token;
+    assert(loginStudentA.status === 200 && !!tokenStudentA, 'Student A authenticated successfully');
+
+    const loginAdmin = await httpRequest('POST', '/api/auth/login', {}, { email: 'admin@export.test', password: 'password123' });
+    const tokenAdmin = loginAdmin.json?.token;
+    assert(loginAdmin.status === 200 && !!tokenAdmin, 'Admin authenticated successfully');
+
+    // 2. GET /api/submissions (Default active)
+    const getSubsA = await httpRequest('GET', '/api/submissions', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(getSubsA.status === 200, 'GET /api/submissions returns HTTP 200');
+    assert(getSubsA.json?.submissions?.length === 2, 'Teacher A only sees 2 submissions from School Alpha (Cross-tenant isolated)');
+
+    // 3. POST /api/submissions/:id/archive (Single Archive by Teacher A)
+    const arcRes1 = await httpRequest('POST', '/api/submissions/sub-alpha-01/archive', { Authorization: `Bearer ${tokenTeacherA}` }, { reason: 'Uji pengarsipan' });
+    assert(arcRes1.status === 200 && arcRes1.json?.success === true, 'Teacher A archives sub-alpha-01 successfully');
+    assert(arcRes1.json?.submission?.isArchived === true, 'Archived submission has isArchived=true');
+    assert(typeof arcRes1.json?.submission?.deletedAt === 'string', 'Archived submission has dual-compat deletedAt string');
+
+    // 4. GET /api/submissions with archiveStatus filters
+    const getActive = await httpRequest('GET', '/api/submissions?archiveStatus=active', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(getActive.json?.submissions?.length === 1 && getActive.json?.submissions[0].id === 'sub-alpha-02', 'GET with archiveStatus=active excludes sub-alpha-01');
+
+    const getArchived = await httpRequest('GET', '/api/submissions?archiveStatus=archived', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(getArchived.json?.submissions?.length === 1 && getArchived.json?.submissions[0].id === 'sub-alpha-01', 'GET with archiveStatus=archived returns only sub-alpha-01');
+
+    const getAll = await httpRequest('GET', '/api/submissions?archiveStatus=all', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(getAll.json?.submissions?.length === 2, 'GET with archiveStatus=all returns both active and archived submissions');
+
+    // 5. Cross-tenant denial: Teacher B tries to archive sub-alpha-02 (School Alpha)
+    const crossArc = await httpRequest('POST', '/api/submissions/sub-alpha-02/archive', { Authorization: `Bearer ${tokenTeacherB}` });
+    assert(crossArc.status === 403, 'Cross-tenant archive attempt by Teacher B returns HTTP 403 Forbidden');
+
+    // 6. Student blocked: Student A tries to archive sub-alpha-02
+    const stdArc = await httpRequest('POST', '/api/submissions/sub-alpha-02/archive', { Authorization: `Bearer ${tokenStudentA}` });
+    assert(stdArc.status === 403, 'Student archive attempt is blocked with HTTP 403');
+
+    // 7. Single restore by Teacher A
+    const restoreRes1 = await httpRequest('POST', '/api/submissions/sub-alpha-01/restore', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(restoreRes1.status === 200 && restoreRes1.json?.submission?.isArchived === false, 'Teacher A restores sub-alpha-01 successfully');
+
+    // 8. Bulk archive by Teacher A
+    const bulkArcRes = await httpRequest('POST', '/api/submissions/bulk-archive', { Authorization: `Bearer ${tokenTeacherA}` }, {
+      submissionIds: ['sub-alpha-01', 'sub-alpha-02'],
+      reason: 'Pengarsipan massal kelas'
+    });
+    assert(bulkArcRes.status === 200 && bulkArcRes.json?.count === 2, 'Teacher A bulk-archives 2 submissions successfully');
+
+    // Verify both are now archived
+    const checkArchived = await httpRequest('GET', '/api/submissions?archiveStatus=archived', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(checkArchived.json?.submissions?.length === 2, 'Both submissions are listed in archived tab');
+
+    // 9. Bulk restore by Teacher A
+    const bulkRestRes = await httpRequest('POST', '/api/submissions/bulk-restore', { Authorization: `Bearer ${tokenTeacherA}` }, {
+      submissionIds: ['sub-alpha-01', 'sub-alpha-02']
+    });
+    assert(bulkRestRes.status === 200 && bulkRestRes.json?.count === 2, 'Teacher A bulk-restores 2 submissions successfully');
+
+    // 10. Permanent Cleanup Authorization:
+    // a. Teacher cannot cleanup permanently
+    const teacherCleanup = await httpRequest('POST', '/api/submissions/sub-alpha-01/cleanup', { Authorization: `Bearer ${tokenTeacherA}` }, { confirmation: true });
+    assert(teacherCleanup.status === 403, 'Teacher attempt to cleanup permanently is blocked with HTTP 403');
+
+    // b. Admin cleanup without confirmation fails
+    const adminNoConf = await httpRequest('POST', '/api/submissions/sub-alpha-01/cleanup', { Authorization: `Bearer ${tokenAdmin}` }, { confirmation: false });
+    assert(adminNoConf.status === 400, 'Admin cleanup without explicit confirmation returns HTTP 400');
+
+    // c. Admin cleanup with confirmation succeeds
+    const adminCleanOk = await httpRequest('POST', '/api/submissions/sub-alpha-01/cleanup', { Authorization: `Bearer ${tokenAdmin}` }, {
+      confirmation: true,
+      reason: 'Audit pembersihan berkas uji coba'
+    });
+    assert(adminCleanOk.status === 200 && adminCleanOk.json?.success === true, 'Admin successfully cleans up test submission permanently');
+
+    // 11. Excel Export HTTP Endpoint (GET /api/exams/:id/export-excel)
+    // a. Teacher A exports exam-export-alpha
+    const exportRes = await httpRequest('GET', '/api/exams/exam-export-alpha/export-excel?classId=cls-alpha-12', { Authorization: `Bearer ${tokenTeacherA}` });
+    assert(exportRes.status === 200, 'GET /api/exams/:id/export-excel returns HTTP 200');
+    assert(exportRes.headers['content-type']?.includes('spreadsheetml.sheet'), 'Content-Type header indicates Excel XLSX format');
+    assert(exportRes.headers['content-disposition']?.includes('.xlsx'), 'Content-Disposition header specifies .xlsx file attachment');
+
+    // Load returned buffer into ExcelJS to verify integrity
+    const exportedWb = new ExcelJS.Workbook();
+    await exportedWb.xlsx.load(exportRes.buffer);
+    const mainWs = exportedWb.getWorksheet('Hasil Ujian');
+    assert(!!mainWs, 'Exported Excel contains "Hasil Ujian" sheet');
+    assert(mainWs.getRow(1).cellCount === 51, `Hasil Ujian sheet has 51 columns (got ${mainWs.getRow(1).cellCount})`);
+    assert(mainWs.getCell(1, 51).value === 'Total Skor', 'Rightmost column is authoritative "Total Skor"');
+
+    // Verify row data in exported Excel
+    assert(mainWs.getCell(2, 1).value === 'Siswa Alpha Dua', 'Row 2 Nama Siswa is Siswa Alpha Dua');
+    assert(mainWs.getCell(2, 2).value === 'NIS-A002', 'Row 2 NIS is NIS-A002');
+    assert(mainWs.getCell(2, 51).value === '78', 'Row 2 Total Skor is authoritative teacher validated score 78');
+
+    // b. Cross-tenant export denial: Teacher B cannot export Teacher A's exam
+    const crossExport = await httpRequest('GET', '/api/exams/exam-export-alpha/export-excel', { Authorization: `Bearer ${tokenTeacherB}` });
+    assert(crossExport.status === 403, 'Cross-tenant Excel export attempt by Teacher B returns HTTP 403 Forbidden');
+
+  } finally {
+    if (serverProc) {
+      serverProc.kill();
+    }
   }
 
   // -------------------------------------------------------------------------

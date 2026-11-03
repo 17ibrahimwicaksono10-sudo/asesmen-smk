@@ -435,6 +435,9 @@ export interface ExamSubmission {
   archivedBy?: string;           // Identitas guru / admin yang mengarsipkan
   archiveReason?: string;        // Alasan pengarsipan
   deletedAt?: string;            // Kompatibilitas skema PostgreSQL deleted_at
+
+  // Agregasi Otoritatif 6 Dimensi KTK (Satu Sumber Kebenaran Guru, Siswa, PDF, Excel)
+  dimensionScores?: Record<string, { raw: number; max: number; percentage: number; name: string }>;
 }
 
 export interface ResearchAnalyticsSummary {

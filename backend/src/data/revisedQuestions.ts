@@ -925,8 +925,14 @@ export function calculateAssessmentScore(answers: Record<string, any>, questions
     manajemen_mutu: { raw: 0, max: 11, percentage: 0, name: 'Manajemen Mutu Laboratorium' }
   };
 
-  questions.forEach(q => {
-    const ans = answers[q.id];
+  questions.forEach((q, idx) => {
+    const ans = answers[q.id] ||
+      answers[q.code] ||
+      answers[`q-${q.number}`] ||
+      answers[`q-0${q.number}`] ||
+      answers[String(q.number)] ||
+      answers[`q-${idx + 1}`] ||
+      answers[String(idx + 1)];
     let qScore = 0;
     const itemMax = q.maxScore || (q.points || 1);
 
@@ -1001,15 +1007,17 @@ export function calculateAssessmentScore(answers: Record<string, any>, questions
       }
       // 4. Essay (Soal 4, 8, 10, 11, 12, 14, 16, 20, 24)
       else if (q.type === 'essay' || q.type === 'short_answer') {
-        if (ans.score !== undefined && ans.score !== null) {
+        if (typeof ans.score === 'number') {
           qScore = Math.min(itemMax, Math.max(0, ans.score));
-        } else {
+        } else if (!ans.isPendingEvaluation) {
           const essayText = [
             ans.essayAnswer || '',
             ans.shortAnswerText || '',
             ans.shortAnswerCalculation || ''
           ].filter(Boolean).join(' ').trim();
-          qScore = essayText ? evaluateEssaySemantic(q.number || 0, essayText) : 0;
+          qScore = essayText ? evaluateEssaySemantic(q.number || (idx + 1), essayText) : 0;
+        } else {
+          qScore = 0;
         }
       }
     }

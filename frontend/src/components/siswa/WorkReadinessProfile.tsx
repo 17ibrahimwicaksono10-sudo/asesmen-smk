@@ -6,6 +6,7 @@ import { calculateAssessmentScore, REVISED_QUESTIONS_24 } from '../../data/revis
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import { Award, Sparkles, Plus, Trash2, Printer, Briefcase, AlertCircle, CheckCircle2, FileText, TrendingUp, Layers, CheckSquare, Target, ShieldCheck, BrainCircuit, MessageSquareText, User2, ChevronDown, ChevronUp, Lock, Building2, GraduationCap, Users, Info, FlaskConical, Eye, FileCheck, X, Calendar } from 'lucide-react';
 import { PrintReportModal } from '../common/PrintReportModal';
+import { apiGet } from '../../services/api';
 
 
 interface WorkReadinessProfileProps {
@@ -393,11 +394,35 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
   // Print Modal
   const [showPrintModal, setShowPrintModal] = useState(false);
 
+  // Auto-fetch full submission detail if bootstrap stripped answers & dimensionScores are missing
+  const [detailSubMap, setDetailSubMap] = useState<Record<string, ExamSubmission>>({});
+  const rawTechSub = techSubmissions[0];
+
+  useEffect(() => {
+    if (!rawTechSub?.id) return;
+    const hasDims = rawTechSub.dimensionScores && Object.keys(rawTechSub.dimensionScores).length >= 6;
+    const hasAnswers = rawTechSub.answers && Object.keys(rawTechSub.answers).length > 0;
+    if (!hasDims && !hasAnswers && !detailSubMap[rawTechSub.id]) {
+      apiGet<{ success: boolean; submission: ExamSubmission }>(`/api/submissions/${rawTechSub.id}`)
+        .then(res => {
+          if (res?.success && res.submission) {
+            setDetailSubMap(prev => ({ ...prev, [rawTechSub.id]: res.submission }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [rawTechSub?.id]);
+
+  const latestTechSub = (rawTechSub && detailSubMap[rawTechSub.id]) ? detailSubMap[rawTechSub.id] : rawTechSub;
+
   // Compute dynamic scores from actual 24-questions submission if available
-  const latestTechSub = techSubmissions[0];
-  const dynamicTechScores = latestTechSub?.answers && Object.keys(latestTechSub.answers).some(k => k.startsWith('q-'))
-    ? calculateAssessmentScore(latestTechSub.answers, REVISED_QUESTIONS_24).dimensionScores
-    : null;
+  const dynamicTechScores = (latestTechSub?.dimensionScores && Object.keys(latestTechSub.dimensionScores).length >= 6)
+    ? latestTechSub.dimensionScores
+    : (latestTechSub?.answers && Object.keys(latestTechSub.answers).some(k => k.startsWith('q-') || k.startsWith('tk-'))
+      ? calculateAssessmentScore(latestTechSub.answers, REVISED_QUESTIONS_24).dimensionScores
+      : null);
+
+  const hasValidTechDimensions = Boolean(dynamicTechScores && Object.keys(dynamicTechScores).length >= 6);
 
   // Compute dynamic scores from actual 18-questions employability non-test submission if available
   const latestEmpSub = empSubmissions[0];
@@ -406,48 +431,55 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
     : null;
 
   // 1. Radar Data: 6 Dimensi Kemampuan Teknis Kimia (Tes 24 Soal, Skor Maksimum 65)
+  // TIDAK MENGGUNAKAN FALLBACK SINTETIS (* 1.05, * 0.95, dll). Hanya nilai server / skor mentah sah.
   const technicalRadarData = [
     {
       skill: 'K3LH & Regulasi',
-      Student: hasTechSubmissions ? (dynamicTechScores ? dynamicTechScores.k3lh.percentage : Math.min(100, Math.round(studentTechScore * 1.05))) : 0,
+      Student: hasValidTechDimensions ? dynamicTechScores!.k3lh.percentage : 0,
       Target: 85,
       fullName: 'Dimensi 1: K3LH dan Regulasi Lab (Maks 10 Poin)',
-      rawScore: hasTechSubmissions ? (dynamicTechScores ? `${dynamicTechScores.k3lh.raw}/10` : `${Math.round(studentTechScore * 0.10)}/10`) : '0/10'
+      rawScore: hasValidTechDimensions ? `${dynamicTechScores!.k3lh.raw}/10` : (hasTechSubmissions ? 'Belum dapat dihitung' : '0/10'),
+      isCalculated: hasValidTechDimensions
     },
     {
       skill: 'Persiapan Analisis',
-      Student: hasTechSubmissions ? (dynamicTechScores ? dynamicTechScores.persiapan_analisis.percentage : studentTechScore) : 0,
+      Student: hasValidTechDimensions ? dynamicTechScores!.persiapan_analisis.percentage : 0,
       Target: 80,
       fullName: 'Dimensi 2: Persiapan Analisis (Maks 10 Poin)',
-      rawScore: hasTechSubmissions ? (dynamicTechScores ? `${dynamicTechScores.persiapan_analisis.raw}/10` : `${Math.round(studentTechScore * 0.10)}/10`) : '0/10'
+      rawScore: hasValidTechDimensions ? `${dynamicTechScores!.persiapan_analisis.raw}/10` : (hasTechSubmissions ? 'Belum dapat dihitung' : '0/10'),
+      isCalculated: hasValidTechDimensions
     },
     {
       skill: 'Stoikiometri',
-      Student: hasTechSubmissions ? (dynamicTechScores ? dynamicTechScores.stoikiometri.percentage : Math.max(0, Math.round(studentTechScore * 0.95))) : 0,
+      Student: hasValidTechDimensions ? dynamicTechScores!.stoikiometri.percentage : 0,
       Target: 80,
       fullName: 'Dimensi 3: Stoikiometri Terapan (Maks 10 Poin)',
-      rawScore: hasTechSubmissions ? (dynamicTechScores ? `${dynamicTechScores.stoikiometri.raw}/10` : `${Math.round(studentTechScore * 0.10)}/10`) : '0/10'
+      rawScore: hasValidTechDimensions ? `${dynamicTechScores!.stoikiometri.raw}/10` : (hasTechSubmissions ? 'Belum dapat dihitung' : '0/10'),
+      isCalculated: hasValidTechDimensions
     },
     {
       skill: 'Analisis Volumetri',
-      Student: hasTechSubmissions ? (dynamicTechScores ? dynamicTechScores.volumetri.percentage : Math.min(100, Math.round(studentTechScore * 1.02))) : 0,
+      Student: hasValidTechDimensions ? dynamicTechScores!.volumetri.percentage : 0,
       Target: 85,
       fullName: 'Dimensi 4: Analisis Volumetri (Maks 13 Poin)',
-      rawScore: hasTechSubmissions ? (dynamicTechScores ? `${dynamicTechScores.volumetri.raw}/13` : `${Math.round(studentTechScore * 0.13)}/13`) : '0/13'
+      rawScore: hasValidTechDimensions ? `${dynamicTechScores!.volumetri.raw}/13` : (hasTechSubmissions ? 'Belum dapat dihitung' : '0/13'),
+      isCalculated: hasValidTechDimensions
     },
     {
       skill: 'Instrumentasi',
-      Student: hasTechSubmissions ? (dynamicTechScores ? dynamicTechScores.instrumentasi.percentage : Math.max(0, Math.round(studentTechScore * 0.96))) : 0,
+      Student: hasValidTechDimensions ? dynamicTechScores!.instrumentasi.percentage : 0,
       Target: 80,
       fullName: 'Dimensi 5: Instrumentasi Dasar (Maks 11 Poin)',
-      rawScore: hasTechSubmissions ? (dynamicTechScores ? `${dynamicTechScores.instrumentasi.raw}/11` : `${Math.round(studentTechScore * 0.11)}/11`) : '0/11'
+      rawScore: hasValidTechDimensions ? `${dynamicTechScores!.instrumentasi.raw}/11` : (hasTechSubmissions ? 'Belum dapat dihitung' : '0/11'),
+      isCalculated: hasValidTechDimensions
     },
     {
       skill: 'Manajemen Mutu',
-      Student: hasTechSubmissions ? (dynamicTechScores ? dynamicTechScores.manajemen_mutu.percentage : studentTechScore) : 0,
+      Student: hasValidTechDimensions ? dynamicTechScores!.manajemen_mutu.percentage : 0,
       Target: 85,
       fullName: 'Dimensi 6: Manajemen Mutu Laboratorium (Maks 11 Poin)',
-      rawScore: hasTechSubmissions ? (dynamicTechScores ? `${dynamicTechScores.manajemen_mutu.raw}/11` : `${Math.round(studentTechScore * 0.11)}/11`) : '0/11'
+      rawScore: hasValidTechDimensions ? `${dynamicTechScores!.manajemen_mutu.raw}/11` : (hasTechSubmissions ? 'Belum dapat dihitung' : '0/11'),
+      isCalculated: hasValidTechDimensions
     },
   ];
 
@@ -455,10 +487,10 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
   const employabilityRadarData = EMPLOYABILITY_ASPECTS.map(asp => {
     const aspectResult = dynamicEmpEvaluation?.aspectResults.find(ar => ar.aspectId === asp.id);
     const scoreVal = hasEmpSubmissions
-      ? (aspectResult ? aspectResult.percentage : studentEmpScore)
+      ? (aspectResult ? aspectResult.percentage : (dynamicEmpEvaluation ? 0 : studentEmpScore))
       : 0;
     const rawVal = hasEmpSubmissions
-      ? (aspectResult ? `${aspectResult.rawScore}/10` : `${Math.round(studentEmpScore * 0.1)}/10`)
+      ? (aspectResult ? `${aspectResult.rawScore}/10` : (dynamicEmpEvaluation ? '0/10' : 'Belum dapat dihitung'))
       : '0/10';
 
     return {
@@ -468,7 +500,8 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
       Target: asp.industryTargetPercent,
       rawScore: rawVal,
       category: aspectResult?.category || 'Cukup',
-      interpretation: aspectResult?.interpretation || ''
+      interpretation: aspectResult?.interpretation || '',
+      isCalculated: Boolean(aspectResult)
     };
   });
 
@@ -1563,7 +1596,7 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
 
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-300 flex flex-wrap gap-2 justify-between items-center">
             <div className="flex items-center gap-2">
-              <span>Capaian Employability Non-Tes: <strong className="text-purple-400">{hasEmpSubmissions ? `${dynamicEmpEvaluation?.totalRawScore || Math.round(studentEmpScore * 0.9)}/90 (${studentEmpScore}%)` : '0/90 (Belum Asesmen)'}</strong></span>
+              <span>Capaian Employability Non-Tes: <strong className="text-purple-400">{hasEmpSubmissions ? (dynamicEmpEvaluation?.totalRawScore !== undefined ? `${dynamicEmpEvaluation.totalRawScore}/90 (${studentEmpScore}%)` : `${studentEmpScore}% (Belum dapat dihitung mentah)`) : '0/90 (Belum Asesmen)'}</strong></span>
               {dynamicEmpEvaluation && (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
                   Kategori: {dynamicEmpEvaluation.category}

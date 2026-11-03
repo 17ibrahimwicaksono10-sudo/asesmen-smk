@@ -230,18 +230,30 @@ export function formatQuestionFeedback(ans?: StudentAnswer, question?: QuestionI
  * Format total skor otoritatif dari database.
  */
 export function formatAuthoritativeTotalScore(sub: ExamSubmission): { scoreValue: number; displayString: string; isFinal: boolean } {
-  // Prioritaskan nilai final guru jika telah divalidasi
-  const authoritativeScore = (sub.isTeacherValidated && sub.teacherScoreTotal !== undefined && sub.teacherScoreTotal !== null)
-    ? Number(sub.teacherScoreTotal)
-    : Number(sub.totalScore ?? 0);
+  const isTeacherValidated = Boolean(sub.isTeacherValidated) || sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || Boolean(sub.validatedBy);
 
-  const isFinal = Boolean(sub.isScoreFinal) || sub.validationStatus === 'approved' || sub.validationStatus === 'revised';
+  let scoreVal: number = 0;
+  if (isTeacherValidated && sub.teacherScoreTotal !== undefined && sub.teacherScoreTotal !== null) {
+    scoreVal = Number(sub.teacherScoreTotal);
+  } else if (isTeacherValidated && (sub as any).teacherFinalScore !== undefined && (sub as any).teacherFinalScore !== null) {
+    scoreVal = Number((sub as any).teacherFinalScore);
+  } else if (sub.totalScore !== undefined && sub.totalScore !== null) {
+    scoreVal = Number(sub.totalScore);
+  } else if (sub.teacherScoreTotal !== undefined && sub.teacherScoreTotal !== null) {
+    scoreVal = Number(sub.teacherScoreTotal);
+  } else if ((sub as any).teacherFinalScore !== undefined && (sub as any).teacherFinalScore !== null) {
+    scoreVal = Number((sub as any).teacherFinalScore);
+  } else if (sub.autoScore !== undefined && sub.autoScore !== null) {
+    scoreVal = Number(sub.autoScore);
+  }
+
+  const isFinal = Boolean(sub.isScoreFinal) || sub.validationStatus === 'approved' || sub.validationStatus === 'revised' || (!sub.hasPendingComponents && !sub.requiresTeacherReview);
   const displayString = isFinal
-    ? `${authoritativeScore}`
-    : `${authoritativeScore} (Belum Final)`;
+    ? `${scoreVal}`
+    : `${scoreVal} (Belum Final)`;
 
   return {
-    scoreValue: authoritativeScore,
+    scoreValue: scoreVal,
     displayString,
     isFinal
   };
@@ -529,6 +541,60 @@ export async function generateExamResultsExcelWorkbook(options: ExcelExportOptio
     rowVals.push(sanitizeExcelFormula(finalScoreInfo.displayString));
     auditSheet.addRow(rowVals);
   });
+
+  // ===========================================================================
+  // SHEET 4: SKOR DIMENSI KOMPETENSI (JIKA TERSEDIA)
+  // ===========================================================================
+  const hasDimensions = targetSubmissions.some(s => s.dimensionScores && Object.keys(s.dimensionScores).length > 0);
+  if (hasDimensions) {
+    const dimSheet = workbook.addWorksheet('Skor Dimensi');
+    const dimCols: Array<{ header: string; key: string; width: number }> = [
+      { header: 'Nama Siswa', key: 'name', width: 26 },
+      { header: 'NIS', key: 'nis', width: 16 }
+    ];
+
+    const dimMap = new Map<string, string>();
+    targetSubmissions.forEach(s => {
+      if (s.dimensionScores) {
+        Object.entries(s.dimensionScores).forEach(([k, v]) => {
+          if (!dimMap.has(k)) {
+            dimMap.set(k, v.name || k);
+          }
+        });
+      }
+    });
+
+    dimMap.forEach((name, key) => {
+      dimCols.push({ header: `${name} (%)`, key: `dim_${key}`, width: 24 });
+    });
+    dimCols.push({ header: 'Total Skor Akhir (%)', key: 'final_score', width: 20 });
+    dimSheet.columns = dimCols;
+
+    const dimHeader = dimSheet.getRow(1);
+    dimHeader.height = 25;
+    dimHeader.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '1E3A8A' } };
+      cell.font = { bold: true, color: { argb: 'FFFFFF' }, size: 10 };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    });
+
+    targetSubmissions.forEach(sub => {
+      const rowVals: any[] = [
+        sanitizeExcelFormula(sub.studentName || 'Tanpa Nama'),
+        sanitizeExcelFormula(sub.studentNis || '-')
+      ];
+
+      dimMap.forEach((_, key) => {
+        const d = sub.dimensionScores ? sub.dimensionScores[key] : undefined;
+        const val = d ? `${d.percentage}% (${d.raw}/${d.max})` : '-';
+        rowVals.push(sanitizeExcelFormula(val));
+      });
+
+      const finalScoreInfo = formatAuthoritativeTotalScore(sub);
+      rowVals.push(sanitizeExcelFormula(finalScoreInfo.displayString));
+      dimSheet.addRow(rowVals);
+    });
+  }
 
   // Format Nama File yang Aman
   const sanitizedClass = (className || 'Semua_Kelas').replace(/[^a-zA-Z0-9_\-]/g, '_');
