@@ -41,6 +41,12 @@ import {
 } from 'lucide-react';
 import { MultimodalReviewModal } from '../common/MultimodalReviewModal';
 import { ExportExcelModal } from './ExportExcelModal';
+import {
+  SecureEvidenceImage,
+  SecureEvidenceAudio,
+  downloadEvidenceFile,
+  resolveEvidenceMediaUrl
+} from '../../utils/evidenceUrlHelper';
 
 interface ExamMonitorProps {
   exams: Exam[];
@@ -1419,26 +1425,30 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                                 {ev.modalityType === 'handwriting' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
                                   <div className="space-y-1.5">
                                     <div className="bg-black/60 p-2 rounded flex justify-center border border-slate-800">
-                                      <img
+                                      <SecureEvidenceImage
                                         src={ev.storageUrl || ev.fileData || ev.previewUrl}
                                         alt="Tulisan Tangan Siswa"
                                         className="max-h-48 object-contain rounded cursor-pointer hover:opacity-90"
-                                        onClick={() => setPreviewImageLightbox(ev.storageUrl || ev.fileData || ev.previewUrl || null)}
+                                        onClick={async () => {
+                                          const raw = ev.storageUrl || ev.fileData || ev.previewUrl;
+                                          if (raw) {
+                                            const resolved = await resolveEvidenceMediaUrl(raw);
+                                            setPreviewImageLightbox(resolved);
+                                          }
+                                        }}
                                         title="Klik untuk memperbesar tampilan foto"
                                       />
                                     </div>
                                     <div className="flex justify-between items-center text-[10px] text-slate-400">
                                       <span>Klik gambar untuk memperbesar</span>
                                       {(ev.storageUrl || ev.fileData) && (
-                                        <a
-                                          href={ev.storageUrl || ev.fileData}
-                                          download={ev.fileName}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="text-indigo-400 hover:text-indigo-300 underline flex items-center gap-1"
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadEvidenceFile(ev.storageUrl || ev.fileData, ev.fileName || 'Tulisan_Tangan_Siswa.jpg')}
+                                          className="text-indigo-400 hover:text-indigo-300 underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0 text-[10px]"
                                         >
                                           <Download className="w-3 h-3" /> Unduh Berkas Asli
-                                        </a>
+                                        </button>
                                       )}
                                     </div>
                                   </div>
@@ -1449,15 +1459,13 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                                   <div className="flex items-center justify-between p-2 rounded bg-slate-950 border border-slate-800">
                                     <span className="text-slate-300 text-[11px]">Dokumen kerja terlampir aman</span>
                                     {(ev.storageUrl || ev.fileData) && (
-                                      <a
-                                        href={ev.storageUrl || ev.fileData}
-                                        download={ev.fileName}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="px-2.5 py-1 bg-indigo-600/30 text-indigo-300 rounded border border-indigo-500/40 text-[11px] flex items-center gap-1"
+                                      <button
+                                        type="button"
+                                        onClick={() => downloadEvidenceFile(ev.storageUrl || ev.fileData, ev.fileName || 'Dokumen_Kerja')}
+                                        className="px-2.5 py-1 bg-indigo-600/30 text-indigo-300 rounded border border-indigo-500/40 text-[11px] flex items-center gap-1 cursor-pointer"
                                       >
                                         <Download className="w-3 h-3" /> Unduh Dokumen
-                                      </a>
+                                      </button>
                                     )}
                                   </div>
                                 )}
@@ -2060,31 +2068,42 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                                 {ev.modalityType === 'handwriting' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
                                   <div className="space-y-2">
                                     <div className="bg-black/70 p-3 rounded-lg border border-slate-800 flex justify-center">
-                                      <img
+                                      <SecureEvidenceImage
                                         src={ev.storageUrl || ev.fileData || ev.previewUrl}
                                         alt="Tulisan Tangan Siswa"
                                         className="max-h-64 object-contain rounded cursor-pointer hover:opacity-90 shadow-md transition"
-                                        onClick={() => setPreviewImageLightbox(ev.storageUrl || ev.fileData || ev.previewUrl || null)}
+                                        onClick={async () => {
+                                          const raw = ev.storageUrl || ev.fileData || ev.previewUrl;
+                                          if (raw) {
+                                            const resolved = await resolveEvidenceMediaUrl(raw);
+                                            setPreviewImageLightbox(resolved);
+                                          }
+                                        }}
                                         title="Klik untuk memperbesar gambar foto"
                                       />
                                     </div>
                                     <div className="flex justify-between items-center text-xs text-slate-400">
                                       <button
-                                        onClick={() => setPreviewImageLightbox(ev.storageUrl || ev.fileData || ev.previewUrl || null)}
-                                        className="text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer"
+                                        type="button"
+                                        onClick={async () => {
+                                          const raw = ev.storageUrl || ev.fileData || ev.previewUrl;
+                                          if (raw) {
+                                            const resolved = await resolveEvidenceMediaUrl(raw);
+                                            setPreviewImageLightbox(resolved);
+                                          }
+                                        }}
+                                        className="text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0 text-xs"
                                       >
                                         <Maximize2 className="w-3 h-3" /> Klik untuk Zoom Layar Penuh
                                       </button>
                                       {(ev.storageUrl || ev.fileData) && (
-                                        <a
-                                          href={ev.storageUrl || ev.fileData}
-                                          download={ev.fileName}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="text-indigo-400 hover:text-indigo-300 underline flex items-center gap-1"
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadEvidenceFile(ev.storageUrl || ev.fileData, ev.fileName || 'Tulisan_Tangan_Siswa.jpg')}
+                                          className="text-indigo-400 hover:text-indigo-300 underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0 text-xs"
                                         >
                                           <Download className="w-3 h-3" /> Unduh Berkas Asli
-                                        </a>
+                                        </button>
                                       )}
                                     </div>
                                   </div>
@@ -2095,15 +2114,13 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                                   <div className="flex items-center justify-between p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs">
                                     <span className="text-slate-300">Dokumen kerja terlampir aman dalam sistem</span>
                                     {(ev.storageUrl || ev.fileData) && (
-                                      <a
-                                        href={ev.storageUrl || ev.fileData}
-                                        download={ev.fileName}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 rounded-lg border border-indigo-500/40 text-xs font-semibold flex items-center gap-1 transition"
+                                      <button
+                                        type="button"
+                                        onClick={() => downloadEvidenceFile(ev.storageUrl || ev.fileData, ev.fileName || 'Dokumen_Kerja')}
+                                        className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 rounded-lg border border-indigo-500/40 text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
                                       >
                                         <Download className="w-3.5 h-3.5" /> Unduh Dokumen
-                                      </a>
+                                      </button>
                                     )}
                                   </div>
                                 )}
@@ -2174,26 +2191,27 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
           onClick={() => setPreviewImageLightbox(null)}
         >
           <div className="absolute top-4 right-4 flex items-center gap-3">
-            <a
-              href={previewImageLightbox}
-              download="Tulisan_Tangan_Siswa"
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="px-3 py-1.5 rounded-xl bg-indigo-600/80 hover:bg-indigo-600 text-white text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer"
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                downloadEvidenceFile(previewImageLightbox, 'Tulisan_Tangan_Siswa.jpg');
+              }}
+              className="px-3 py-1.5 rounded-xl bg-indigo-600/80 hover:bg-indigo-600 text-white text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer border-0"
             >
               <Download className="w-3.5 h-3.5" /> Unduh Berkas
-            </a>
+            </button>
             <button
+              type="button"
               onClick={() => setPreviewImageLightbox(null)}
-              className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-white cursor-pointer"
+              className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-white cursor-pointer border-0"
             >
               <X className="w-6 h-6" />
             </button>
           </div>
 
           <div className="max-w-[90vw] max-h-[85vh] flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
-            <img
+            <SecureEvidenceImage
               src={previewImageLightbox}
               alt="Pratinjau Resolusi Penuh"
               className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl border border-slate-700"

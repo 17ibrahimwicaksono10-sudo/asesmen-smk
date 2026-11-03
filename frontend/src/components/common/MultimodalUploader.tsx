@@ -31,6 +31,11 @@ import {
   Lock,
   Check
 } from 'lucide-react';
+import {
+  SecureEvidenceImage,
+  SecureEvidenceAudio,
+  downloadEvidenceFile
+} from '../../utils/evidenceUrlHelper';
 
 interface MultimodalUploaderProps {
   questionId: string;
@@ -778,11 +783,10 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
                         </span>
                       )}
                     </div>
-                    <audio
+                    <SecureEvidenceAudio
                       controls
                       src={ev.storageUrl || ev.fileData || ev.previewUrl}
                       className="w-full h-8 rounded"
-                      preload="metadata"
                       onLoadedMetadata={(e) => {
                         const el = e.currentTarget;
                         if (el.duration === Infinity || isNaN(el.duration) || el.duration === 0) {
@@ -800,7 +804,7 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
                 {/* Handwriting image thumbnail preview */}
                 {ev.modalityType === 'handwriting' && (ev.storageUrl || ev.previewUrl || ev.fileData) && (
                   <div className="mt-2.5 pt-2 border-t border-slate-700/50 flex items-center gap-3">
-                    <img
+                    <SecureEvidenceImage
                       src={ev.storageUrl || ev.previewUrl || ev.fileData}
                       alt="Pratinjau Tulisan Tangan"
                       className="w-14 h-14 object-cover rounded border border-slate-700 bg-black cursor-pointer hover:opacity-90"
@@ -984,21 +988,19 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-[11px] font-semibold text-slate-300">Pratinjau Berkas Asli:</span>
                     {(previewEvidence.storageUrl || previewEvidence.fileData) && (
-                      <a
-                        href={previewEvidence.storageUrl || previewEvidence.fileData}
-                        download={previewEvidence.fileName}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 underline"
+                      <button
+                        type="button"
+                        onClick={() => downloadEvidenceFile(previewEvidence.storageUrl || previewEvidence.fileData, previewEvidence.fileName || 'berkas_bukti')}
+                        className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 underline cursor-pointer bg-transparent border-0 p-0"
                       >
                         <Download className="w-3 h-3" />
                         Buka / Unduh Berkas Asli (Traceability)
-                      </a>
+                      </button>
                     )}
                   </div>
 
                   {previewEvidence.modalityType === 'audio' && (previewEvidence.storageUrl || previewEvidence.fileData || previewEvidence.previewUrl) && (
-                    <audio
+                    <SecureEvidenceAudio
                       controls
                       src={previewEvidence.storageUrl || previewEvidence.fileData || previewEvidence.previewUrl}
                       className="w-full rounded bg-slate-800"
@@ -1007,7 +1009,7 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
 
                   {previewEvidence.modalityType === 'handwriting' && (previewEvidence.storageUrl || previewEvidence.fileData || previewEvidence.previewUrl) && (
                     <div className="bg-black/60 p-2 rounded border border-slate-700 flex justify-center">
-                      <img
+                      <SecureEvidenceImage
                         src={previewEvidence.storageUrl || previewEvidence.fileData || previewEvidence.previewUrl}
                         alt="Berkas Asli Tulisan Tangan"
                         className="max-h-64 object-contain rounded"
@@ -1025,16 +1027,14 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
                         </div>
                       </div>
                       {(previewEvidence.storageUrl || previewEvidence.fileData) && (
-                        <a
-                          href={previewEvidence.storageUrl || previewEvidence.fileData}
-                          download={previewEvidence.fileName}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/40 rounded text-xs font-medium flex items-center gap-1.5"
+                        <button
+                          type="button"
+                          onClick={() => downloadEvidenceFile(previewEvidence.storageUrl || previewEvidence.fileData, previewEvidence.fileName || 'dokumen_kerja')}
+                          className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/40 rounded text-xs font-medium flex items-center gap-1.5 cursor-pointer"
                         >
                           <Download className="w-3.5 h-3.5" />
                           Unduh Dokumen
-                        </a>
+                        </button>
                       )}
                     </div>
                   )}

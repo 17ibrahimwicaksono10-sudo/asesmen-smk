@@ -48,8 +48,10 @@ import {
   checkR2ObjectExists,
   verifyR2UploadedObject,
   isLocalStorageFallbackAllowed,
-  StoredFileMetadata
+  StoredFileMetadata,
+  normalizeStorageKey
 } from "./services/r2StorageService";
+export { normalizeStorageKey } from "./services/r2StorageService";
 
 
 export function reloadEnv(): void {
@@ -4617,6 +4619,13 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
         const mimeType = isAudio ? "audio/webm" : isHandwriting ? "image/jpeg" : (ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
         const category = isAudio ? 'evidence_audio' : isHandwriting ? 'evidence_image' : 'evidence_document';
 
+        const dbForUpload = getDb();
+        const studentUserForUpload = (dbForUpload.users || []).find((u: any) =>
+          (studentNis && (u.nis === studentNis || u.id === studentNis || u.username === studentNis)) ||
+          ((req as any).user?.id && (u.id === (req as any).user?.id || u.nis === (req as any).user?.nis))
+        );
+        const effectiveSchoolId = (req as any).user?.schoolId || studentUserForUpload?.schoolId || undefined;
+
         const stored = await uploadFileToR2OrLocal({
           buffer: fileBuffer,
           fileName: fileName || `evidence_${modalityType}${ext}`,
@@ -4625,7 +4634,7 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
           ownerId: (req as any).user?.id || studentNis || 'student',
           ownerNis: studentNis,
           ownerName: studentName,
-          schoolId: (req as any).user?.schoolId,
+          schoolId: effectiveSchoolId,
           examId: req.body.examId,
           questionId,
           audioDurationSeconds
@@ -4639,7 +4648,7 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
         storedFileSize = stored.fileSize;
 
         // Catat metadata bukti ke database aktif
-        const db = getDb();
+        const db = dbForUpload;
         if (!db.evidenceMetadata) {
           db.evidenceMetadata = [];
         }
@@ -4649,7 +4658,7 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
           questionId: questionId || 'general',
           studentNis: studentNis || '',
           studentName: studentName || '',
-          schoolId: (req as any).user?.schoolId,
+          schoolId: effectiveSchoolId,
           modalityType,
           fileName: fileName || `Bukti_${modalityType}`,
           fileSize: storedFileSize,
@@ -5012,6 +5021,165 @@ app.get("/api/evidence/audit/:evidenceId", requireAuth, (req: Request, res: Resp
 });
 
 // -------------------------------------------------------------
+// Helper Otorisasi Akses Berkas Bukti (Cloudflare R2 & Private Storage)
+// Menjamin multi-tenancy sekolah, proteksi lintas siswa, dan keamanan folder school-general
+// -------------------------------------------------------------
+export function verifyEvidenceAccess(
+  rawKey: string,
+  authUser: { id: string; role: string; nis?: string; schoolId?: string },
+  db: ReturnType<typeof getDb>
+): { allowed: boolean; reason?: string; normalizedKey: string } {
+  const normKey = normalizeStorageKey(rawKey);
+  if (!normKey) {
+    return { allowed: false, reason: "Key berkas tidak valid.", normalizedKey: "" };
+  }
+
+  // 1. Role Admin memiliki akses penuh untuk supervisi & audit
+  if (authUser.role === "admin") {
+    return { allowed: true, normalizedKey: normKey };
+  }
+
+  // 2. Ekstrak petunjuk sekolah dan siswa dari format canonical path:
+  // Format: schools/{schoolId}/students/{studentIdOrNis}/exams/{examId}/...
+  let pathSchoolId: string | undefined;
+  let pathStudentIdOrNis: string | undefined;
+  let pathExamId: string | undefined;
+
+  const schoolMatch = normKey.match(/schools\/([^\/]+)/i);
+  if (schoolMatch) pathSchoolId = schoolMatch[1];
+
+  const studentMatch = normKey.match(/students\/([^\/]+)/i);
+  if (studentMatch) pathStudentIdOrNis = studentMatch[1];
+
+  const examMatch = normKey.match(/exams\/([^\/]+)/i);
+  if (examMatch) pathExamId = examMatch[1];
+
+  // 3. Cari metadata terdaftar di database
+  const meta = (db.evidenceMetadata || []).find((m: any) =>
+    (m.storageKey && normalizeStorageKey(m.storageKey) === normKey) ||
+    (m.storageUrl && normalizeStorageKey(m.storageUrl) === normKey) ||
+    (m.fileName && normKey.endsWith(m.fileName))
+  );
+
+  const targetStudentNis = meta?.studentNis || meta?.ownerNis || meta?.ownerId || pathStudentIdOrNis;
+  let targetSchoolId = meta?.schoolId;
+
+  // Jika targetSchoolId belum ada atau bernilai 'school-general', cari sekolah siswa di db.users
+  if (!targetSchoolId || targetSchoolId === 'school-general') {
+    const studentUser = (db.users || []).find((u: any) =>
+      (targetStudentNis && (u.nis === targetStudentNis || u.id === targetStudentNis || u.username === targetStudentNis)) ||
+      (pathStudentIdOrNis && (u.nis === pathStudentIdOrNis || u.id === pathStudentIdOrNis || u.username === pathStudentIdOrNis))
+    );
+    if (studentUser?.schoolId) {
+      targetSchoolId = studentUser.schoolId;
+    }
+  }
+
+  // Jika masih belum ditemukan, cek submission atau exam
+  if ((!targetSchoolId || targetSchoolId === 'school-general') && (meta?.submissionId || targetStudentNis)) {
+    const sub = (db.submissions || []).find((s: any) =>
+      (meta?.submissionId && s.id === meta.submissionId) ||
+      (targetStudentNis && (s.studentNis === targetStudentNis || s.studentId === targetStudentNis))
+    );
+    if (sub?.schoolId) {
+      targetSchoolId = sub.schoolId;
+    }
+  }
+
+  if ((!targetSchoolId || targetSchoolId === 'school-general') && (pathExamId || meta?.examId)) {
+    const examTargetId = pathExamId || meta?.examId;
+    const exam = (db.exams || []).find((e: any) => e.id === examTargetId);
+    if (exam?.schoolId) {
+      targetSchoolId = exam.schoolId;
+    }
+  }
+
+  const clean = (val?: string) => (val || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  // 4. Aturan Otorisasi untuk SISWA
+  if (authUser.role === "siswa") {
+    const userNis = clean(authUser.nis);
+    const userId = clean(authUser.id);
+
+    const isMatchNis = Boolean(
+      userNis && (
+        clean(targetStudentNis) === userNis ||
+        clean(pathStudentIdOrNis) === userNis ||
+        clean(normKey).includes(userNis)
+      )
+    );
+
+    const isMatchId = Boolean(
+      userId && (
+        clean(targetStudentNis) === userId ||
+        clean(pathStudentIdOrNis) === userId ||
+        clean(normKey).includes(userId)
+      )
+    );
+
+    if (isMatchNis || isMatchId) {
+      return { allowed: true, normalizedKey: normKey };
+    }
+
+    return {
+      allowed: false,
+      reason: "Akses ditolak. Anda tidak berhak mengakses berkas siswa lain.",
+      normalizedKey: normKey
+    };
+  }
+
+  // 5. Aturan Otorisasi untuk GURU
+  if (authUser.role === "guru") {
+    const teacherSchool = clean(authUser.schoolId);
+
+    if (teacherSchool) {
+      if (targetSchoolId && targetSchoolId !== 'school-general' && clean(targetSchoolId) === teacherSchool) {
+        return { allowed: true, normalizedKey: normKey };
+      }
+
+      if (pathSchoolId && pathSchoolId !== 'school-general' && clean(pathSchoolId) === teacherSchool) {
+        return { allowed: true, normalizedKey: normKey };
+      }
+
+      // Jika pathSchoolId adalah school-general atau targetSchoolId kosong/school-general,
+      // kita periksa apakah siswa terdaftar di sekolah yang sama dengan guru
+      if (targetStudentNis) {
+        const studentUser = (db.users || []).find((u: any) =>
+          u.nis === targetStudentNis || u.id === targetStudentNis || u.username === targetStudentNis
+        );
+        if (studentUser && clean(studentUser.schoolId) === teacherSchool) {
+          return { allowed: true, normalizedKey: normKey };
+        }
+      }
+
+      // Jika berkas terkait ujian di sekolah guru ini
+      if (pathExamId || meta?.examId) {
+        const examTargetId = pathExamId || meta?.examId;
+        const exam = (db.exams || []).find((e: any) => e.id === examTargetId);
+        if (exam && (clean(exam.schoolId) === teacherSchool || exam.createdBy === authUser.id)) {
+          return { allowed: true, normalizedKey: normKey };
+        }
+      }
+
+      return {
+        allowed: false,
+        reason: "Akses ditolak. Anda tidak berhak mengakses berkas dari sekolah lain.",
+        normalizedKey: normKey
+      };
+    }
+
+    // Jika guru tidak memiliki schoolId spesifik (guru umum/admin evaluator)
+    return { allowed: true, normalizedKey: normKey };
+  }
+
+  return {
+    allowed: false,
+    reason: "Akses ditolak. Peran pengguna tidak diizinkan mengakses berkas ini.",
+    normalizedKey: normKey
+  };
+}
+
+// -------------------------------------------------------------
 // Endpoint Penyajian Berkas dari Cloudflare R2 (Authenticated Streaming)
 // PEMERIKSAAN KEAMANAN 2: Dilarang menggunakan JWT login utama pada query parameter (?token=...)
 // Hanya menerima Header Authorization atau token akses file khusus (?fileToken=...)
@@ -5023,7 +5191,7 @@ app.get("/api/evidence/r2/*", optionalAuth, async (req: Request, res: Response) 
       return res.status(400).json({ success: false, error: "Key berkas R2 tidak valid." });
     }
 
-    const storageKey = decodeURIComponent(rawKey);
+    const storageKey = normalizeStorageKey(rawKey);
 
     // PEMERIKSAAN KEAMANAN 2: Cegah keras pemakaian JWT login utama pada query string (?token=...)
     if (req.query.token) {
@@ -5059,28 +5227,13 @@ app.get("/api/evidence/r2/*", optionalAuth, async (req: Request, res: Response) 
       });
     }
 
-    // Otorisasi: Proteksi Lintas Siswa & Multi-Tenant Sekolah
-    if (authUser.role === 'siswa') {
-      const isOwner = storageKey.includes(authUser.nis || '') ||
-                      storageKey.includes(authUser.id) ||
-                      storageKey.includes(`students/${authUser.nis}`) ||
-                      storageKey.includes(`students/${authUser.id}`);
-      if (!isOwner) {
-        return res.status(403).json({
-          success: false,
-          error: "Akses ditolak. Anda tidak berhak mengakses berkas siswa lain."
-        });
-      }
-    } else if (authUser.role === 'guru') {
-      if (authUser.schoolId && !storageKey.includes('school-general')) {
-        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
-        if (!storageKey.includes(`schools/${cleanSchool}`)) {
-          return res.status(403).json({
-            success: false,
-            error: "Akses ditolak. Anda tidak berhak mengakses berkas dari sekolah lain."
-          });
-        }
-      }
+    const db = getDb();
+    const authCheck = verifyEvidenceAccess(storageKey, authUser, db);
+    if (!authCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: authCheck.reason || "Akses ditolak ke berkas bukti ini."
+      });
     }
 
     // Ambil buffer berkas dari Cloudflare R2 (atau fallback lokal jika diizinkan)
@@ -5116,29 +5269,18 @@ app.post("/api/storage/file-token", requireAuth, async (req: Request, res: Respo
       return res.status(400).json({ success: false, error: "storageKey wajib disediakan." });
     }
 
-    // Validasi otorisasi sebelum menerbitkan token khusus
-    if (authUser.role === 'siswa') {
-      const isOwner = storageKey.includes(authUser.nis || '') ||
-                      storageKey.includes(authUser.id) ||
-                      storageKey.includes(`students/${authUser.nis}`) ||
-                      storageKey.includes(`students/${authUser.id}`);
-      if (!isOwner) {
-        return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak meminta token untuk berkas siswa lain." });
-      }
-    } else if (authUser.role === 'guru') {
-      if (authUser.schoolId && !storageKey.includes('school-general')) {
-        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
-        if (!storageKey.includes(`schools/${cleanSchool}`)) {
-          return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak meminta token untuk berkas sekolah lain." });
-        }
-      }
+    const db = getDb();
+    const authCheck = verifyEvidenceAccess(storageKey, authUser, db);
+    if (!authCheck.allowed) {
+      return res.status(403).json({ success: false, error: authCheck.reason });
     }
 
+    const normalizedKey = authCheck.normalizedKey;
     const fileToken = generateScopedFileToken({
       userId: authUser.id,
       role: authUser.role,
       schoolId: authUser.schoolId,
-      storageKey,
+      storageKey: normalizedKey,
       expiresInSeconds: 300 // 5 menit
     });
 
@@ -5146,10 +5288,11 @@ app.post("/api/storage/file-token", requireAuth, async (req: Request, res: Respo
       success: true,
       fileToken,
       expiresIn: 300,
-      storageKey
+      storageKey: normalizedKey
     });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message || "Gagal membuat token akses berkas." });
+    console.error("Error generating scoped file token:", err);
+    res.status(500).json({ success: false, error: err.message || "Gagal membuat token akses file khusus." });
   }
 });
 
@@ -5374,33 +5517,19 @@ app.post("/api/storage/presigned-download", requireAuth, async (req: Request, re
       return res.status(400).json({ success: false, error: "storageKey wajib disediakan." });
     }
 
-    // Otorisasi
-    if (authUser.role === 'siswa') {
-      const isOwner = storageKey.includes(authUser.nis || '') ||
-                      storageKey.includes(authUser.id) ||
-                      storageKey.includes(`students/${authUser.nis}`) ||
-                      storageKey.includes(`students/${authUser.id}`);
-      if (!isOwner) {
-        return res.status(403).json({
-          success: false,
-          error: "Akses ditolak. Anda tidak berhak membaca berkas siswa lain."
-        });
-      }
-    } else if (authUser.role === 'guru') {
-      if (authUser.schoolId && !storageKey.includes('school-general')) {
-        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
-        if (!storageKey.includes(`schools/${cleanSchool}`)) {
-          return res.status(403).json({
-            success: false,
-            error: "Akses ditolak. Anda tidak berhak mengakses berkas dari sekolah lain."
-          });
-        }
-      }
+    const db = getDb();
+    const authCheck = verifyEvidenceAccess(storageKey, authUser, db);
+    if (!authCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: authCheck.reason || "Akses ditolak ke berkas bukti ini."
+      });
     }
 
+    const normalizedKey = authCheck.normalizedKey;
     const r2Config = getR2Config();
     if (r2Config.isConfigured) {
-      const downloadUrl = await getPresignedR2DownloadUrl(storageKey, 900);
+      const downloadUrl = await getPresignedR2DownloadUrl(normalizedKey, 900);
       return res.json({
         success: true,
         downloadUrl,
@@ -5422,13 +5551,13 @@ app.post("/api/storage/presigned-download", requireAuth, async (req: Request, re
       userId: authUser.id,
       role: authUser.role,
       schoolId: authUser.schoolId,
-      storageKey,
+      storageKey: normalizedKey,
       expiresInSeconds: 300
     });
 
     return res.json({
       success: true,
-      downloadUrl: `/api/evidence/r2/${encodeURIComponent(storageKey)}?fileToken=${scopedToken}`,
+      downloadUrl: `/api/evidence/r2/${encodeURIComponent(normalizedKey)}?fileToken=${scopedToken}`,
       fileToken: scopedToken,
       expiresIn: 300,
       storageProvider: 'local'
@@ -5451,23 +5580,23 @@ app.delete("/api/storage/file", requireAuth, async (req: Request, res: Response)
       return res.status(400).json({ success: false, error: "storageKey atau fileId wajib disediakan." });
     }
 
-    if (authUser.role === 'siswa') {
-      if (storageKey) {
-        const isOwner = storageKey.includes(authUser.nis || '') ||
-                        storageKey.includes(authUser.id) ||
-                        storageKey.includes(`students/${authUser.nis}`) ||
-                        storageKey.includes(`students/${authUser.id}`);
-        if (!isOwner) {
-          return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak menghapus berkas ini." });
-        }
-      }
+    const db = getDb();
+    let targetKey = storageKey;
+    if (fileId && (!targetKey || targetKey.trim() === '')) {
+      const foundMeta = (db.evidenceMetadata || []).find(m => m.id === fileId);
+      if (foundMeta) targetKey = foundMeta.storageKey;
     }
 
-    let targetKey = storageKey;
-    const db = getDb();
+    if (targetKey) {
+      const authCheck = verifyEvidenceAccess(targetKey, authUser, db);
+      if (!authCheck.allowed) {
+        return res.status(403).json({ success: false, error: authCheck.reason || "Akses ditolak untuk menghapus berkas ini." });
+      }
+      targetKey = authCheck.normalizedKey;
+    }
 
     if (db.evidenceMetadata) {
-      const foundIdx = db.evidenceMetadata.findIndex(m => m.id === fileId || m.storageKey === storageKey);
+      const foundIdx = db.evidenceMetadata.findIndex(m => m.id === fileId || m.storageKey === storageKey || (targetKey && m.storageKey === targetKey));
       if (foundIdx >= 0) {
         targetKey = targetKey || db.evidenceMetadata[foundIdx].storageKey;
         db.evidenceMetadata.splice(foundIdx, 1);

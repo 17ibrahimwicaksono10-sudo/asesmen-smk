@@ -26,6 +26,11 @@ import {
   Hash,
   BookOpen
 } from 'lucide-react';
+import {
+  SecureEvidenceImage,
+  SecureEvidenceAudio,
+  downloadEvidenceFile
+} from '../../utils/evidenceUrlHelper';
 
 interface MultimodalReviewModalProps {
   submission: ExamSubmission;
@@ -542,9 +547,8 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
                           {/* Original Media Preview (Audit-Ready & Immutable) */}
                           {ev.modalityType === 'audio' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
                             <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
-                              <audio
+                              <SecureEvidenceAudio
                                 controls
-                                preload="metadata"
                                 src={ev.storageUrl || ev.fileData || ev.previewUrl}
                                 className="w-full h-8"
                                 onLoadedMetadata={(e) => {
@@ -570,7 +574,7 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
                           )}
                           {ev.modalityType === 'handwriting' && (ev.storageUrl || ev.fileData || ev.previewUrl) && (
                             <div className="bg-black/60 p-2 rounded flex justify-center border border-slate-800">
-                              <img
+                              <SecureEvidenceImage
                                 src={ev.storageUrl || ev.fileData || ev.previewUrl}
                                 alt="Foto Tulisan Tangan"
                                 className="max-h-48 object-contain rounded"
@@ -591,16 +595,14 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
                               )}
                             </div>
                             {(ev.storageUrl || ev.fileData) && (
-                              <a
-                                href={ev.storageUrl || ev.fileData}
-                                download={ev.fileName}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 underline text-[11px] font-medium"
+                              <button
+                                type="button"
+                                onClick={() => downloadEvidenceFile(ev.storageUrl || ev.fileData, ev.fileName || 'berkas_bukti')}
+                                className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 underline text-[11px] font-medium cursor-pointer bg-transparent border-0 p-0"
                               >
                                 <ExternalLink className="w-3 h-3" />
                                 Buka / Unduh Berkas Asli
-                              </a>
+                              </button>
                             )}
                           </div>
 

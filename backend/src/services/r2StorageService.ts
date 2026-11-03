@@ -133,6 +133,37 @@ export function generateR2ObjectKey(params: {
 }
 
 /**
+ * Normalisasi storageKey agar bebas dari prefix URL, query params,
+ * dan aman dari encoding ganda (%2F -> /).
+ */
+export function normalizeStorageKey(raw?: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let key = raw.trim();
+
+  // Bersihkan prefix URL jika ada
+  if (key.startsWith('/api/evidence/r2/')) {
+    key = key.replace(/^\/api\/evidence\/r2\//, '');
+  } else if (key.startsWith('/api/evidence/file/')) {
+    key = key.replace(/^\/api\/evidence\/file\//, '');
+  }
+
+  // Hilangkan query string (?fileToken=... dll)
+  key = key.split('?')[0];
+
+  // Dekode rekursif untuk mencegah double-encoding (%2F -> /)
+  try {
+    let prev = '';
+    while (key !== prev && (key.includes('%25') || key.includes('%2F') || key.includes('%2f') || key.includes('%20') || key.includes('%3A') || key.includes('%3a'))) {
+      prev = key;
+      key = decodeURIComponent(key);
+    }
+  } catch (_) {}
+
+  // Hilangkan leading slash
+  return key.replace(/^\/+/, '');
+}
+
+/**
  * Periksa apakah fallback ke penyimpanan disk lokal diizinkan.
  * Hanya diizinkan jika mode development atau ALLOW_LOCAL_STORAGE_FALLBACK=true.
  * Di staging/production, fallback lokal dilarang keras untuk mencegah inkonsistensi.
@@ -286,9 +317,10 @@ export async function getPresignedR2DownloadUrl(storageKey: string, ttlSeconds =
     throw new Error('Cloudflare R2 belum dikonfigurasi. Tidak dapat membuat presigned URL.');
   }
 
+  const normalizedKey = normalizeStorageKey(storageKey);
   const getCommand = new GetObjectCommand({
     Bucket: config.bucket,
-    Key: storageKey
+    Key: normalizedKey
   });
 
   return getSignedUrl(client, getCommand, { expiresIn: ttlSeconds });
@@ -335,16 +367,17 @@ export async function getPresignedR2UploadUrl(options: {
 export async function getR2ObjectBuffer(storageKey: string): Promise<{ buffer: Buffer; contentType: string; contentLength: number }> {
   const client = getR2Client();
   const config = getR2Config();
+  const normalizedKey = normalizeStorageKey(storageKey);
 
   if (client && config.isConfigured) {
     const getCommand = new GetObjectCommand({
       Bucket: config.bucket,
-      Key: storageKey
+      Key: normalizedKey
     });
 
     const response = await client.send(getCommand);
     if (!response.Body) {
-      throw new Error(`Isi objek R2 kosong untuk key: ${storageKey}`);
+      throw new Error(`Isi objek R2 kosong untuk key: ${normalizedKey}`);
     }
 
     // Stream ke Buffer
@@ -370,11 +403,11 @@ export async function getR2ObjectBuffer(storageKey: string): Promise<{ buffer: B
 
   // Jika R2 belum dikonfigurasi, periksa apakah fallback lokal diizinkan
   if (!isLocalStorageFallbackAllowed()) {
-    throw new Error(`[Cloudflare R2 Storage Error] Cloudflare R2 belum dikonfigurasi dan fallback penyimpanan lokal dinonaktifkan: ${storageKey}`);
+    throw new Error(`[Cloudflare R2 Storage Error] Cloudflare R2 belum dikonfigurasi dan fallback penyimpanan lokal dinonaktifkan: ${normalizedKey}`);
   }
 
   const storageDir = getEvidenceStorageDir();
-  const diskName = path.basename(storageKey);
+  const diskName = path.basename(normalizedKey);
   const localPath = path.join(storageDir, diskName);
   if (fs.existsSync(localPath)) {
     const buf = fs.readFileSync(localPath);
