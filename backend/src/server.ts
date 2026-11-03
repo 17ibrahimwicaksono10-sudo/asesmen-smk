@@ -2031,10 +2031,23 @@ app.get("/api/submissions/:id", requireAuth, (req: AuthenticatedRequest, res: Re
   });
 });
 
-// 3. POST /api/exams/:id/draft: Simpan Draft Jawaban Siswa di Server (WAJIB AUTH)
+// 3. POST /api/exams/:id/draft: Simpan Draft Jawaban Siswa di Server (WAJIB AUTH & ISOLASI SEKOLAH)
 app.post("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb() as any;
   const { id: examId } = req.params;
+
+  // Validasi Kepemilikan Ujian & Pembatasan Sekolah untuk Siswa
+  const exam = (db.exams || []).find((e: any) => e.id === examId);
+  if (req.user?.role === 'siswa' && exam) {
+    if (exam.schoolId && req.user.schoolId && exam.schoolId !== req.user.schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Anda tidak memiliki akses ke ujian dari sekolah lain."
+      });
+    }
+  }
+
+  // Siswa strictly hanya dapat menyimpan draft dirinya sendiri
   const studentId = req.user?.role === 'siswa' ? req.user.userId : (req.body.studentId || req.user?.userId);
   const studentNis = req.user?.role === 'siswa' ? (req.user.identityNo || req.body.studentNis) : req.body.studentNis;
   const answers = req.body.answers || req.body.draftData || {};
@@ -2046,6 +2059,8 @@ app.post("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: R
     examId,
     studentId,
     studentNis,
+    schoolId: req.user?.schoolId,
+    schoolName: req.user?.schoolName,
     answers,
     draftData: answers,
     currentQuestionIndex,
@@ -2056,10 +2071,21 @@ app.post("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: R
   res.json({ success: true, savedAt: draftRecord.updatedAt, draft: draftRecord, data: draftRecord });
 });
 
-// 4. GET /api/exams/:id/draft: Ambil Draft Jawaban Siswa dari Server (WAJIB AUTH)
+// 4. GET /api/exams/:id/draft: Ambil Draft Jawaban Siswa dari Server (WAJIB AUTH & ISOLASI SEKOLAH)
 app.get("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const db = getDb() as any;
   const { id: examId } = req.params;
+
+  // Validasi Kepemilikan Ujian untuk Siswa
+  const exam = (db.exams || []).find((e: any) => e.id === examId);
+  if (req.user?.role === 'siswa' && exam) {
+    if (exam.schoolId && req.user.schoolId && exam.schoolId !== req.user.schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses ditolak: Anda tidak memiliki akses ke ujian dari sekolah lain."
+      });
+    }
+  }
   
   if (req.user?.role === 'siswa') {
     const requestedNis = req.query.studentNis as string | undefined;
@@ -2081,8 +2107,33 @@ app.get("/api/exams/:id/draft", requireAuth, (req: AuthenticatedRequest, res: Re
     return res.json({ success: false, draft: null, data: null });
   }
 
+  // Isolasi Guru: Guru dilarang mengakses draft siswa di luar sekolah binaannya
+  if (req.user?.role === 'guru') {
+    const targetStudent = (db.users || []).find((u: any) =>
+      u.id === studentKey || (u.identityNo && u.identityNo === studentKey)
+    );
+    if (targetStudent) {
+      const isSameSchool = (targetStudent.schoolId && req.user.schoolId && targetStudent.schoolId === req.user.schoolId) ||
+        (targetStudent.schoolName && req.user.schoolName && isSchoolMatchStrict(targetStudent.schoolName, req.user.schoolName));
+      if (targetStudent.schoolId && !isSameSchool) {
+        return res.status(403).json({
+          success: false,
+          error: "Akses ditolak: Draft siswa ini berada di luar kewenangan sekolah Anda."
+        });
+      }
+    }
+  }
+
   const draftKey = `${examId}_${studentKey}`;
   const draft = db.drafts?.[draftKey] || null;
+
+  // Double-check isolasi sekolah pada draft record jika ada
+  if (draft && req.user?.role === 'guru' && draft.schoolId && req.user.schoolId && draft.schoolId !== req.user.schoolId) {
+    return res.status(403).json({
+      success: false,
+      error: "Akses ditolak: Draft siswa ini berada di luar kewenangan sekolah Anda."
+    });
+  }
 
   res.json({ success: true, draft, data: draft });
 });
