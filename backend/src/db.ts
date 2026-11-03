@@ -16,7 +16,8 @@ import {
   ArchivedItem,
   SystemSettings,
   PortfolioItem,
-  SubmissionAuditLog
+  SubmissionAuditLog,
+  EvidenceMetadata
 } from "./types";
 import {
   PRESET_USERS,
@@ -46,6 +47,7 @@ export interface DatabaseSchema {
   drafts?: Record<string, any>;
   readinessProfiles?: Record<string, any>;
   submissionAuditLogs?: SubmissionAuditLog[];
+  evidenceMetadata?: EvidenceMetadata[];
   lastUpdated: string;
 }
 
@@ -244,7 +246,10 @@ export function getDb(): DatabaseSchema {
   return dbCache;
 }
 
-export function saveDb(): boolean {
+export function saveDb(updatedData?: DatabaseSchema): boolean {
+  if (updatedData) {
+    dbCache = updatedData;
+  }
   if (!dbCache) return false;
   try {
     dbCache.lastUpdated = new Date().toISOString();

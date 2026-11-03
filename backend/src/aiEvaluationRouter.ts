@@ -17,12 +17,33 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { getDb, getEvidenceStorageDir } from "./db";
+import { getR2ObjectBuffer } from "./services/r2StorageService";
 
-export function resolveMediaBase64(mediaDataOrUrl?: string): string {
+export async function resolveMediaBase64(mediaDataOrUrl?: string): Promise<string> {
   if (!mediaDataOrUrl) return '';
-  if (mediaDataOrUrl.startsWith('data:') || mediaDataOrUrl.length > 500) {
+  if (mediaDataOrUrl.startsWith('data:') || (mediaDataOrUrl.length > 500 && !mediaDataOrUrl.includes('/'))) {
     return mediaDataOrUrl;
   }
+
+  // 1. Coba periksa apakah berkas tersimpan di Cloudflare R2
+  try {
+    let r2Key = mediaDataOrUrl;
+    if (mediaDataOrUrl.includes('/api/evidence/r2/')) {
+      const parts = mediaDataOrUrl.split('/api/evidence/r2/');
+      r2Key = decodeURIComponent(parts[1] || '');
+    }
+
+    if (r2Key && (r2Key.startsWith('schools/') || r2Key.startsWith('certificates/') || r2Key.startsWith('reports/'))) {
+      const r2Obj = await getR2ObjectBuffer(r2Key);
+      if (r2Obj && r2Obj.buffer) {
+        return `data:${r2Obj.contentType};base64,${r2Obj.buffer.toString('base64')}`;
+      }
+    }
+  } catch (r2Err) {
+    console.warn('[AI Router] Warning resolving media from R2:', r2Err);
+  }
+
+  // 2. Fallback disk lokal
   try {
     const filename = path.basename(mediaDataOrUrl);
     const storageDir = getEvidenceStorageDir();
@@ -32,7 +53,7 @@ export function resolveMediaBase64(mediaDataOrUrl?: string): string {
       return buf.toString('base64');
     }
   } catch (err) {
-    console.warn('[AI Router] Error resolving media file:', err);
+    console.warn('[AI Router] Error resolving media file locally:', err);
   }
   return mediaDataOrUrl;
 }
@@ -352,7 +373,7 @@ export async function evaluateImageWithGeminiVision(
     prompt_version: 'v4.0-gemini-direct-vision'
   };
 
-  const resolvedMedia = resolveMediaBase64(rawImageData);
+  const resolvedMedia = await resolveMediaBase64(rawImageData);
   if (!resolvedMedia) {
     return {
       ...baseResult,
@@ -601,7 +622,7 @@ export async function evaluateAudioWithGeminiSTTAndDeepSeek(
     };
   }
 
-  const resolvedMedia = resolveMediaBase64(rawAudioData);
+  const resolvedMedia = await resolveMediaBase64(rawAudioData);
   if (!resolvedMedia) {
     return {
       ...baseResult,

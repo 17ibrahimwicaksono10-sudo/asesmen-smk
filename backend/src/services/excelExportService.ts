@@ -48,17 +48,28 @@ export function sanitizeExcelFormula(value: any): any {
 export function formatStudentAnswerText(ans?: StudentAnswer, question?: QuestionItem): string {
   if (!ans) return 'Tidak dijawab';
 
+  // Helper pencari label opsi baik bentuk string maupun objek { id, text }
+  const resolveOptionText = (optId: string, optionsList?: any[]): string => {
+    if (!optionsList || !Array.isArray(optionsList)) return optId;
+    for (const opt of optionsList) {
+      if (typeof opt === 'string') {
+        if (opt.startsWith(optId + '.') || opt.startsWith(optId + ' ') || opt === optId) {
+          return opt;
+        }
+      } else if (opt && typeof opt === 'object') {
+        if (opt.id === optId || opt.key === optId || opt.label === optId || opt.value === optId) {
+          return opt.text || opt.label || opt.value || optId;
+        }
+      }
+    }
+    return optId;
+  };
+
   // 1. Regular Multiple Choice (Typed field atau generic answer)
   const mcqChoice = ans.selectedOption ?? (typeof ans.answer === 'string' && (question?.type === 'multiple_choice' || question?.options) ? ans.answer : undefined);
   if (mcqChoice !== undefined && mcqChoice !== null && String(mcqChoice).trim() !== '') {
     const choiceStr = String(mcqChoice).trim();
-    if (question?.options && Array.isArray(question.options)) {
-      const matchedOpt = question.options.find(o => o.id === choiceStr || o.text === choiceStr);
-      if (matchedOpt) {
-        return matchedOpt.text ? `${matchedOpt.id ? matchedOpt.id + '. ' : ''}${matchedOpt.text}` : choiceStr;
-      }
-    }
-    return choiceStr;
+    return resolveOptionText(choiceStr, question?.options);
   }
 
   // 2. Complex MCQ (Pilihan Ganda Kompleks - Checkboxes)
@@ -67,17 +78,14 @@ export function formatStudentAnswerText(ans?: StudentAnswer, question?: Question
     : (Array.isArray(ans.answer) ? ans.answer : undefined);
   if (pgkChoices && pgkChoices.length > 0) {
     if (question?.options && Array.isArray(question.options)) {
-      const labels = pgkChoices.map(optId => {
-        const found = question.options?.find(o => o.id === optId || o.text === optId);
-        return found ? (found.text || optId) : optId;
-      });
+      const labels = pgkChoices.map(optId => resolveOptionText(String(optId), question.options));
       return labels.join(', ');
     }
     return pgkChoices.join(', ');
   }
 
   // 3. Matching (Menjodohkan)
-  const matchObj = ans.matchingAnswers || (typeof ans.answer === 'object' && ans.answer !== null && !Array.isArray(ans.answer) && question?.type === 'matrix_matching' ? ans.answer : undefined);
+  const matchObj = ans.matchingAnswers || (typeof ans.answer === 'object' && ans.answer !== null && !Array.isArray(ans.answer) && (question?.type as any) === 'matrix_matching' ? ans.answer : undefined);
   if (matchObj && Object.keys(matchObj).length > 0) {
     const parts = Object.entries(matchObj).map(([colA, colB]) => `${colA} -> ${colB}`);
     return parts.join('; ');

@@ -39,6 +39,7 @@ export interface AuthPayload {
   name: string;
   role: Role;
   identityNo?: string;
+  nis?: string;
   schoolId?: string;
   schoolName?: string;
   classId?: string;
@@ -96,10 +97,11 @@ export function generateAuthToken(user: User): string {
   const payload: AuthPayload = {
     userId: user.id,
     id: user.id,
-    email: user.email.toLowerCase(),
+    email: (user.email || '').toLowerCase(),
     name: user.name,
     role: user.role,
     identityNo: user.identityNo,
+    nis: (user as any).nis || user.identityNo,
     schoolId: user.schoolId,
     schoolName: user.schoolName,
     classId: user.classId,
@@ -245,4 +247,82 @@ export function sanitizeSettings(settings: SystemSettings): Record<string, any> 
     }));
   }
   return safe;
+}
+
+// =============================================================================
+// TOKEN AKSES FILE KHUSUS (SCOPED FILE TOKEN)
+// Mencegah kebocoran JWT login utama pada query parameter (?token=...)
+// Memiliki masa berlaku pendek (default 5 menit) dan terikat pada storageKey spesifik.
+// =============================================================================
+
+export interface ScopedFileTokenPayload {
+  tokenType: 'scoped_file_token';
+  userId: string;
+  role: Role;
+  schoolId?: string;
+  storageKey: string;
+  iat: number;
+  exp: number;
+}
+
+export function generateScopedFileToken(params: {
+  userId: string;
+  role: Role;
+  schoolId?: string;
+  storageKey: string;
+  expiresInSeconds?: number;
+}): string {
+  const now = Date.now();
+  const ttlMs = (params.expiresInSeconds || 300) * 1000;
+  const payload: ScopedFileTokenPayload = {
+    tokenType: 'scoped_file_token',
+    userId: params.userId,
+    role: params.role,
+    schoolId: params.schoolId,
+    storageKey: params.storageKey,
+    iat: now,
+    exp: now + ttlMs,
+  };
+
+  const payloadBase64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto
+    .createHmac('sha256', AUTH_SECRET + '_file_scope')
+    .update(payloadBase64)
+    .digest('base64url');
+
+  return `${payloadBase64}.${signature}`;
+}
+
+export function verifyScopedFileToken(token: string, expectedStorageKey: string): ScopedFileTokenPayload | null {
+  try {
+    if (!token || typeof token !== 'string') return null;
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+
+    const [payloadBase64, signature] = parts;
+    const expectedSig = crypto
+      .createHmac('sha256', AUTH_SECRET + '_file_scope')
+      .update(payloadBase64)
+      .digest('base64url');
+
+    const sigBuf = Buffer.from(signature);
+    const expectedSigBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expectedSigBuf.length) return null;
+    if (!crypto.timingSafeEqual(sigBuf, expectedSigBuf)) return null;
+
+    const payload: ScopedFileTokenPayload = JSON.parse(Buffer.from(payloadBase64, 'base64url').toString('utf8'));
+    if (payload.tokenType !== 'scoped_file_token') return null;
+
+    if (Date.now() > payload.exp) {
+      return null;
+    }
+
+    if (payload.storageKey !== expectedStorageKey) {
+      return null;
+    }
+
+    return payload;
+  } catch (err) {
+    return null;
+  }
 }

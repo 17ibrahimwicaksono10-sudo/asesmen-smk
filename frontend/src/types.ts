@@ -214,8 +214,10 @@ export interface MultimodalEvidence {
   audioDurationSeconds?: number;
 
   // Audit-Ready & Storage Traceability (Jaminan Bukti Asli Persisten)
-  storageUrl?: string;       // URL persisten ke server arsip (e.g. /api/evidence/file/...)
-  storagePath?: string;      // Path fisik penyimpanan pada server
+  storageUrl?: string;       // URL persisten ke server arsip (e.g. /api/evidence/file/... atau /api/evidence/r2/...)
+  storagePath?: string;      // Path fisik penyimpanan pada server atau storage key
+  storageKey?: string;       // Canonical object key Cloudflare R2 (e.g. schools/{sch}/students/{std}/...)
+  storageProvider?: 'r2' | 'local'; // Provider penyimpanan aktif
   fileHash?: string;         // SHA-256 checksum untuk pembuktian keaslian (tamper-evident audit)
   isArchived?: boolean;      // Status tersimpan dalam repositori arsip persisten
 
@@ -229,6 +231,33 @@ export interface MultimodalEvidence {
   qualityStatus?: 'pass' | 'warning' | 'fail';
   qualityIssues?: string[];
   unreadableFlags?: UnreadableFlag[];
+}
+
+export interface EvidenceMetadata {
+  id: string;
+  submissionId?: string;
+  examId?: string;
+  questionId: string;
+  studentNis: string;
+  studentName: string;
+  schoolId?: string;
+  modalityType: ModalityType;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  storageKey: string;
+  storagePath?: string;
+  storageUrl: string;
+  storageProvider: 'r2' | 'local';
+  fileHash: string;
+  audioDurationSeconds?: number;
+  isArchived: boolean;
+  uploadTime: string;
+  extractedText?: string;
+  extractionStatus?: 'saved' | 'pending' | 'completed' | 'failed' | 'extraction_failed' | 'warning';
+  qualityStatus?: 'pass' | 'warning' | 'fail';
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface IndicatorScore {

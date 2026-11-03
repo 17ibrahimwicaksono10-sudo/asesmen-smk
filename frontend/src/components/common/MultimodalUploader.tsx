@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MultimodalEvidence, ModalityType, ExtractionArtifact } from '../../types';
+import { compressAnswerImage } from '../../utils/imageCompressor';
 import {
   Mic,
   Square,
@@ -416,60 +417,83 @@ export const MultimodalUploader: React.FC<MultimodalUploaderProps> = ({
     onChangeEvidences(targetList.map((e) => (e.id === evidence.id ? updatedItem : e)));
   };
 
-  // Handle File Upload Change
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: ModalityType) => {
+  // Handle File Upload Change (dengan kompresi otomatis untuk foto jawaban tulisan tangan)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: ModalityType) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    Array.from(files).forEach((file) => {
-      // Validate file size (< 20MB)
-      if (file.size > 20 * 1024 * 1024) {
-        alert(`Ukuran file "${file.name}" melebihi batas 20MB.`);
-        return;
+    for (const file of Array.from(files)) {
+      // Validasi batas ukuran file awal (< 25MB)
+      if (file.size > 25 * 1024 * 1024) {
+        alert(`Ukuran file "${file.name}" melebihi batas 25MB.`);
+        continue;
       }
 
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        const base64data = reader.result as string;
+      // 1. Kompresi otomatis khusus foto tulisan tangan / gambar jawaban ke target 300 - 500 KB
+      if (type === 'handwriting' || type === 'image' || file.type.startsWith('image/')) {
+        try {
+          const compResult = await compressAnswerImage(file, file.name);
+          saveNewEvidence({
+            modalityType: type,
+            fileName: file.name,
+            fileSize: compResult.compressedSize,
+            mimeType: compResult.mimeType,
+            fileData: compResult.dataUrl,
+            previewUrl: compResult.dataUrl
+          });
+          continue;
+        } catch (compErr) {
+          console.warn('[ImageCompressor] Kompresi gagal, melanjutkan dengan berkas asli:', compErr);
+        }
+      }
 
-        // Cek jika berkas dokumen berbasis teks (.txt, .csv, .md, .json, .rtf)
-        const isTextDoc =
-          file.type.startsWith('text/') ||
-          Boolean(file.name.match(/\.(txt|csv|md|json|log|rtf)$/i));
+      // 2. Berkas dokumen teks (.txt, .csv, .md, .json, .rtf)
+      const isTextDoc =
+        file.type.startsWith('text/') ||
+        Boolean(file.name.match(/\.(txt|csv|md|json|log|rtf)$/i));
 
-        if (isTextDoc) {
-          const textReader = new FileReader();
-          textReader.readAsText(file);
-          textReader.onload = () => {
-            const extracted = (textReader.result as string) || '';
-            const cleanText = extracted.trim();
-            if (onTextTranscribed && cleanText) {
-              onTextTranscribed(cleanText);
-            }
+      if (isTextDoc) {
+        const textReader = new FileReader();
+        textReader.readAsText(file);
+        textReader.onload = () => {
+          const extracted = (textReader.result as string) || '';
+          const cleanText = extracted.trim();
+          if (onTextTranscribed && cleanText) {
+            onTextTranscribed(cleanText);
+          }
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = () => {
             saveNewEvidence({
               modalityType: type,
               fileName: file.name,
               fileSize: file.size,
               mimeType: file.type || 'text/plain',
-              fileData: base64data,
+              fileData: reader.result as string,
               previewUrl: URL.createObjectURL(file),
               extractedText: cleanText || undefined
             });
           };
-        } else {
-          saveNewEvidence({
-            modalityType: type,
-            fileName: file.name,
-            fileSize: file.size,
-            mimeType: file.type || 'application/octet-stream',
-            fileData: base64data,
-            previewUrl: URL.createObjectURL(file)
-          });
-        }
+        };
+        continue;
+      }
+
+      // 3. Dokumen resmi / PDF / Audio tanpa kompresi destruktif
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        saveNewEvidence({
+          modalityType: type,
+          fileName: file.name,
+          fileSize: file.size,
+          mimeType: file.type || 'application/octet-stream',
+          fileData: reader.result as string,
+          previewUrl: URL.createObjectURL(file)
+        });
       };
-    });
-    // Reset input
+    }
+
+    // Reset input agar dapat memilih berkas yang sama ulang jika dibutuhkan
     e.target.value = '';
   };
 

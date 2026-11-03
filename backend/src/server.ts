@@ -15,12 +15,14 @@ import {
   sanitizeSettings,
   generateAuthToken,
   verifyAuthToken,
+  generateScopedFileToken,
+  verifyScopedFileToken,
   hashPassword,
   verifyPassword,
   AuthenticatedRequest,
   AuthPayload,
 } from "./auth";
-import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem, SubmissionAuditLog } from "./types";
+import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem, SubmissionAuditLog, EvidenceMetadata } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
 import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
 export { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE, NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE };
@@ -35,6 +37,19 @@ import {
 } from "./aiEvaluationRouter";
 import { aiQueueManager } from "./aiEvaluationQueue";
 import { generateExamResultsExcelWorkbook } from "./services/excelExportService";
+import {
+  uploadFileToR2OrLocal,
+  getPresignedR2UploadUrl,
+  getPresignedR2DownloadUrl,
+  getR2ObjectBuffer,
+  deleteR2Object,
+  generateR2ObjectKey,
+  getR2Config,
+  checkR2ObjectExists,
+  verifyR2UploadedObject,
+  isLocalStorageFallbackAllowed,
+  StoredFileMetadata
+} from "./services/r2StorageService";
 
 
 export function reloadEnv(): void {
@@ -3535,7 +3550,43 @@ Berikan evaluasi dalam format JSON persis:
 
     const cleanJson = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
     const evaluation = JSON.parse(cleanJson);
-    res.json({ success: true, evaluation, provider });
+
+    // Simpan berkas PDF sertifikat asli ke Cloudflare R2 / penyimpanan arsip persisten jika dilampirkan
+    let storedCertificateFile: any = null;
+    if (req.body.pdfBase64) {
+      try {
+        const base64Data = req.body.pdfBase64.replace(/^data:[^;]+;base64,/, "");
+        const buffer = Buffer.from(base64Data, "base64");
+        const stored = await uploadFileToR2OrLocal({
+          buffer,
+          fileName: fileName || "sertifikat.pdf",
+          mimeType: "application/pdf",
+          category: "certificate",
+          ownerId: (req as any).user?.id || studentName || "student",
+          schoolId: (req as any).user?.schoolId
+        });
+        storedCertificateFile = {
+          storageKey: stored.storageKey,
+          storageUrl: stored.storageUrl,
+          storageProvider: stored.storageProvider,
+          fileHash: stored.fileHash,
+          fileSize: stored.fileSize
+        };
+      } catch (pdfErr: any) {
+        console.error("[Portfolio Storage] Gagal menyimpan sertifikat PDF ke storage persisten:", pdfErr);
+        return res.status(502).json({
+          success: false,
+          error: `Gagal menyimpan sertifikat ke Cloudflare R2: ${pdfErr.message || 'Penyimpanan gagal'}`
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      evaluation,
+      provider,
+      storedFile: storedCertificateFile
+    });
   } catch (error: any) {
     console.error("Error in AI evaluate-certificate:", error);
     res.status(500).json({
@@ -4368,26 +4419,85 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
     let fileHash = "";
     let storageUrl = "";
     let storagePath = "";
-    let storedFileName = "";
+    let storageKey = "";
+    let storageProvider: 'r2' | 'local' = 'local';
+    let storedFileSize = fileData ? Math.round((fileData.length * 3) / 4) : 45000;
 
     if (fileData) {
       try {
         const base64Data = fileData.replace(/^data:[^;]+;base64,/, "");
         const fileBuffer = Buffer.from(base64Data, "base64");
-
-        // SHA-256 Hash untuk ketertelusuran (traceability) & integritas audit
+        storedFileSize = fileBuffer.length;
         fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 
         const ext = path.extname(fileName || "") || (isAudio ? ".webm" : isHandwriting ? ".jpg" : ".pdf");
-        const safeBase = path.basename(fileName || "evidence", ext).replace(/[^a-zA-Z0-9_-]/g, "_");
-        storedFileName = `${evidenceId || Date.now()}_${fileHash.substring(0, 10)}_${safeBase}${ext}`;
+        const mimeType = isAudio ? "audio/webm" : isHandwriting ? "image/jpeg" : (ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
+        const category = isAudio ? 'evidence_audio' : isHandwriting ? 'evidence_image' : 'evidence_document';
 
-        storagePath = path.join(EVIDENCE_STORAGE_DIR, storedFileName);
-        fs.writeFileSync(storagePath, fileBuffer);
+        const stored = await uploadFileToR2OrLocal({
+          buffer: fileBuffer,
+          fileName: fileName || `evidence_${modalityType}${ext}`,
+          mimeType,
+          category,
+          ownerId: (req as any).user?.id || studentNis || 'student',
+          ownerNis: studentNis,
+          ownerName: studentName,
+          schoolId: (req as any).user?.schoolId,
+          examId: req.body.examId,
+          questionId,
+          audioDurationSeconds
+        });
 
-        storageUrl = `/api/evidence/file/${storedFileName}`;
-      } catch (saveErr) {
-        console.warn("[Multimodal Storage] Warning saving persistent file to disk:", saveErr);
+        fileHash = stored.fileHash;
+        storageUrl = stored.storageUrl;
+        storageKey = stored.storageKey;
+        storagePath = stored.storageKey;
+        storageProvider = stored.storageProvider;
+        storedFileSize = stored.fileSize;
+
+        // Catat metadata bukti ke database aktif
+        const db = getDb();
+        if (!db.evidenceMetadata) {
+          db.evidenceMetadata = [];
+        }
+        const metaEntry: EvidenceMetadata = {
+          id: evidenceId || stored.id,
+          examId: req.body.examId,
+          questionId: questionId || 'general',
+          studentNis: studentNis || '',
+          studentName: studentName || '',
+          schoolId: (req as any).user?.schoolId,
+          modalityType,
+          fileName: fileName || `Bukti_${modalityType}`,
+          fileSize: storedFileSize,
+          mimeType,
+          storageKey,
+          storagePath: storageKey,
+          storageUrl,
+          storageProvider,
+          fileHash,
+          audioDurationSeconds,
+          isArchived: true,
+          uploadTime: uploadTime || new Date().toISOString(),
+          extractedText: req.body.extractedText || undefined,
+          extractionStatus: req.body.extractedText ? 'completed' : 'saved',
+          qualityStatus: 'pass',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        const existingIdx = db.evidenceMetadata.findIndex(m => m.id === metaEntry.id || m.storageKey === storageKey);
+        if (existingIdx >= 0) {
+          db.evidenceMetadata[existingIdx] = { ...db.evidenceMetadata[existingIdx], ...metaEntry };
+        } else {
+          db.evidenceMetadata.push(metaEntry);
+        }
+        saveDb(db);
+      } catch (saveErr: any) {
+        console.error("[Multimodal Storage] Gagal menyimpan berkas ke storage persisten:", saveErr);
+        return res.status(502).json({
+          success: false,
+          error: `Gagal menyimpan bukti ke Cloudflare R2: ${saveErr.message || 'Penyimpanan gagal'}`
+        });
       }
     }
 
@@ -4403,12 +4513,14 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
         questionId,
         modalityType,
         fileName: fileName || `Bukti_${modalityType}`,
-        fileSize: fileData ? Math.round((fileData.length * 3) / 4) : 45000,
+        fileSize: storedFileSize,
         mimeType: isAudio ? "audio/webm" : isHandwriting ? "image/jpeg" : "application/pdf",
         fileData: undefined, // Hapus Base64 dari respons; klien cukup memakai storageUrl
         previewUrl: storageUrl || undefined,
         storageUrl,
         storagePath,
+        storageKey,
+        storageProvider,
         fileHash,
         audioDurationSeconds,
         isArchived: !!storageUrl,
@@ -4435,12 +4547,14 @@ app.post("/api/ai/process-multimodal-evidence", async (req: Request, res: Respon
       questionId,
       modalityType,
       fileName: fileName || `Bukti_${modalityType}`,
-      fileSize: fileData ? Math.round((fileData.length * 3) / 4) : 45000,
+      fileSize: storedFileSize,
       mimeType: isAudio ? "audio/webm" : isHandwriting ? "image/jpeg" : "application/pdf",
       fileData,
       previewUrl: storageUrl || fileData,
       storageUrl,
       storagePath,
+      storageKey,
+      storageProvider,
       fileHash,
       isArchived: !!storageUrl,
       extractedText: req.body.extractedText || undefined,
@@ -4497,9 +4611,56 @@ app.post("/api/ai/evaluate-submission/:submissionId", async (req: Request, res: 
 // -------------------------------------------------------------
 // Endpoint Penyajian Berkas Bukti Persisten (Audit-Ready Streaming)
 // -------------------------------------------------------------
-app.get("/api/evidence/file/:filename", (req: Request, res: Response) => {
+app.get("/api/evidence/file/:filename", optionalAuth, (req: Request, res: Response) => {
   try {
+    if (req.query.token) {
+      return res.status(400).json({
+        success: false,
+        error: "Penggunaan JWT login utama pada query parameter (?token=...) dilarang. Gunakan token akses file khusus (?fileToken=...)."
+      });
+    }
+
+    let authUser = (req as any).user;
     const safeFileName = path.basename(req.params.filename);
+
+    if (!authUser && req.query.fileToken && typeof req.query.fileToken === 'string') {
+      const scopedPayload = verifyScopedFileToken(req.query.fileToken, safeFileName);
+      if (scopedPayload) {
+        authUser = {
+          id: scopedPayload.userId,
+          role: scopedPayload.role,
+          schoolId: scopedPayload.schoolId
+        };
+      } else {
+        return res.status(401).json({
+          success: false,
+          error: "Token akses file khusus (?fileToken) tidak valid, kadaluarsa, atau tidak cocok dengan berkas yang diminta."
+        });
+      }
+    }
+
+    if (!authUser) {
+      return res.status(401).json({
+        success: false,
+        error: "Akses ditolak. Header autentikasi atau token akses file khusus (?fileToken=...) diperlukan."
+      });
+    }
+
+    // Otorisasi kepemilikan siswa dan sekolah guru
+    const db = getDb();
+    const meta = (db.evidenceMetadata || []).find(m => m.fileName === safeFileName || (m.storageUrl && m.storageUrl.includes(safeFileName)));
+
+    if (authUser.role === 'siswa') {
+      const isOwner = safeFileName.includes(authUser.nis || '') || safeFileName.includes(authUser.id) || (meta && (meta.studentNis === authUser.nis || meta.studentNis === authUser.id));
+      if (!isOwner) {
+        return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak mengakses berkas siswa lain." });
+      }
+    } else if (authUser.role === 'guru') {
+      if (meta && meta.schoolId && authUser.schoolId && meta.schoolId !== authUser.schoolId) {
+        return res.status(403).json({ success: false, error: "Akses ditolak. Berkas ini milik siswa sekolah lain." });
+      }
+    }
+
     const filePath = path.join(EVIDENCE_STORAGE_DIR, safeFileName);
 
     if (!fs.existsSync(filePath)) {
@@ -4525,7 +4686,7 @@ app.get("/api/evidence/file/:filename", (req: Request, res: Response) => {
     };
 
     const contentType = mimeMap[ext] || "application/octet-stream";
-    res.setHeader("Cache-Control", "public, max-age=86400"); // Cacheable for audit verification
+    res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
     res.setHeader("X-Audit-Traceable", "true");
 
     res.sendFile(filePath, {
@@ -4543,8 +4704,9 @@ app.get("/api/evidence/file/:filename", (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Endpoint Inspeksi Audit & Verifikasi Integritas SHA-256
 // -------------------------------------------------------------
-app.get("/api/evidence/audit/:evidenceId", (req: Request, res: Response) => {
+app.get("/api/evidence/audit/:evidenceId", requireAuth, (req: Request, res: Response) => {
   try {
+    const authUser = (req as any).user;
     const { evidenceId } = req.params;
     const db = getDb();
 
@@ -4611,6 +4773,19 @@ app.get("/api/evidence/audit/:evidenceId", (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: "Bukti tidak ditemukan dalam basis data maupun repositori arsip." });
     }
 
+    // Otorisasi audit: Siswa hanya boleh lihat bukti miliknya, Guru hanya boleh lihat bukti sekolahnya
+    if (authUser.role === 'siswa') {
+      const isOwner = (matchedEvidence.studentNis === authUser.nis) || (matchedEvidence.studentNis === authUser.id);
+      if (!isOwner) {
+        return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak melihat audit bukti siswa lain." });
+      }
+    } else if (authUser.role === 'guru') {
+      const studentUser = (db.users || []).find(u => u.identityNo === matchedEvidence!.studentNis || u.id === matchedEvidence!.studentNis);
+      if (studentUser && studentUser.schoolId && authUser.schoolId && studentUser.schoolId !== authUser.schoolId) {
+        return res.status(403).json({ success: false, error: "Akses ditolak. Bukti ini milik siswa sekolah lain." });
+      }
+    }
+
     let physicalFileExists = false;
     let calculatedHash = "";
     if (matchedEvidence.storagePath && fs.existsSync(matchedEvidence.storagePath)) {
@@ -4650,6 +4825,484 @@ app.get("/api/evidence/audit/:evidenceId", (req: Request, res: Response) => {
   } catch (err: any) {
     console.error("Error in evidence audit check:", err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// Endpoint Penyajian Berkas dari Cloudflare R2 (Authenticated Streaming)
+// PEMERIKSAAN KEAMANAN 2: Dilarang menggunakan JWT login utama pada query parameter (?token=...)
+// Hanya menerima Header Authorization atau token akses file khusus (?fileToken=...)
+// -------------------------------------------------------------
+app.get("/api/evidence/r2/*", optionalAuth, async (req: Request, res: Response) => {
+  try {
+    const rawKey = req.params[0] || (req.params as any)[0];
+    if (!rawKey) {
+      return res.status(400).json({ success: false, error: "Key berkas R2 tidak valid." });
+    }
+
+    const storageKey = decodeURIComponent(rawKey);
+
+    // PEMERIKSAAN KEAMANAN 2: Cegah keras pemakaian JWT login utama pada query string (?token=...)
+    if (req.query.token) {
+      return res.status(400).json({
+        success: false,
+        error: "Penggunaan JWT login utama pada query parameter (?token=...) dilarang karena risiko kebocoran riwayat peramban dan log server. Gunakan Presigned GET URL atau token akses file khusus (?fileToken=...)."
+      });
+    }
+
+    let authUser = (req as any).user;
+
+    // Jika tidak ada header Authorization, periksa apakah ada scoped file token khusus (?fileToken=...)
+    if (!authUser && req.query.fileToken && typeof req.query.fileToken === 'string') {
+      const scopedPayload = verifyScopedFileToken(req.query.fileToken, storageKey);
+      if (scopedPayload) {
+        authUser = {
+          id: scopedPayload.userId,
+          role: scopedPayload.role,
+          schoolId: scopedPayload.schoolId
+        };
+      } else {
+        return res.status(401).json({
+          success: false,
+          error: "Token akses file khusus (?fileToken) tidak valid, kadaluarsa, atau tidak cocok dengan berkas yang diminta."
+        });
+      }
+    }
+
+    if (!authUser) {
+      return res.status(401).json({
+        success: false,
+        error: "Akses ditolak. Header autentikasi atau token akses file khusus (?fileToken=...) diperlukan untuk mengakses berkas privat."
+      });
+    }
+
+    // Otorisasi: Proteksi Lintas Siswa & Multi-Tenant Sekolah
+    if (authUser.role === 'siswa') {
+      const isOwner = storageKey.includes(authUser.nis || '') ||
+                      storageKey.includes(authUser.id) ||
+                      storageKey.includes(`students/${authUser.nis}`) ||
+                      storageKey.includes(`students/${authUser.id}`);
+      if (!isOwner) {
+        return res.status(403).json({
+          success: false,
+          error: "Akses ditolak. Anda tidak berhak mengakses berkas siswa lain."
+        });
+      }
+    } else if (authUser.role === 'guru') {
+      if (authUser.schoolId && !storageKey.includes('school-general')) {
+        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        if (!storageKey.includes(`schools/${cleanSchool}`)) {
+          return res.status(403).json({
+            success: false,
+            error: "Akses ditolak. Anda tidak berhak mengakses berkas dari sekolah lain."
+          });
+        }
+      }
+    }
+
+    // Ambil buffer berkas dari Cloudflare R2 (atau fallback lokal jika diizinkan)
+    const fileObj = await getR2ObjectBuffer(storageKey);
+
+    res.setHeader("Content-Type", fileObj.contentType);
+    res.setHeader("Content-Length", fileObj.contentLength);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("X-Storage-Provider", "cloudflare-r2");
+    res.setHeader("X-Audit-Traceable", "true");
+
+    res.send(fileObj.buffer);
+  } catch (err: any) {
+    console.error("Error streaming R2 evidence file:", err);
+    res.status(404).json({
+      success: false,
+      error: "Berkas bukti tidak ditemukan pada Cloudflare R2 arsip."
+    });
+  }
+});
+
+// -------------------------------------------------------------
+// Endpoint Permintaan Token Akses Berkas Khusus (Scoped File Token)
+// Digunakan frontend jika ingin memutar audio atau memuat gambar
+// melalui endpoint streaming tanpa membocorkan JWT utama ke query string.
+// -------------------------------------------------------------
+app.post("/api/storage/file-token", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const { storageKey } = req.body;
+
+    if (!storageKey) {
+      return res.status(400).json({ success: false, error: "storageKey wajib disediakan." });
+    }
+
+    // Validasi otorisasi sebelum menerbitkan token khusus
+    if (authUser.role === 'siswa') {
+      const isOwner = storageKey.includes(authUser.nis || '') ||
+                      storageKey.includes(authUser.id) ||
+                      storageKey.includes(`students/${authUser.nis}`) ||
+                      storageKey.includes(`students/${authUser.id}`);
+      if (!isOwner) {
+        return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak meminta token untuk berkas siswa lain." });
+      }
+    } else if (authUser.role === 'guru') {
+      if (authUser.schoolId && !storageKey.includes('school-general')) {
+        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        if (!storageKey.includes(`schools/${cleanSchool}`)) {
+          return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak meminta token untuk berkas sekolah lain." });
+        }
+      }
+    }
+
+    const fileToken = generateScopedFileToken({
+      userId: authUser.id,
+      role: authUser.role,
+      schoolId: authUser.schoolId,
+      storageKey,
+      expiresInSeconds: 300 // 5 menit
+    });
+
+    res.json({
+      success: true,
+      fileToken,
+      expiresIn: 300,
+      storageKey
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || "Gagal membuat token akses berkas." });
+  }
+});
+
+// -------------------------------------------------------------
+// Endpoint Presigned Upload URL (Cloudflare R2 Direct Upload)
+// -------------------------------------------------------------
+app.post("/api/storage/presigned-upload", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const { fileName, mimeType, fileSize, category = 'evidence_image', examId, questionId, submissionId } = req.body;
+
+    if (!fileName || !mimeType) {
+      return res.status(400).json({ success: false, error: "fileName dan mimeType wajib disediakan." });
+    }
+
+    const size = Number(fileSize) || 1024;
+    if (size > 25 * 1024 * 1024) {
+      return res.status(400).json({ success: false, error: "Ukuran berkas melebihi batas 25MB." });
+    }
+
+    const validCategories = ['evidence_image', 'evidence_audio', 'evidence_document', 'certificate', 'practicum_report'];
+    const chosenCategory = (validCategories.includes(category) ? category : 'evidence_image') as any;
+
+    const storageKey = generateR2ObjectKey({
+      schoolId: authUser.schoolId,
+      studentIdOrNis: authUser.nis || authUser.id,
+      category: chosenCategory,
+      fileName,
+      examId,
+      questionId,
+      submissionId
+    });
+
+    const r2Config = getR2Config();
+    if (r2Config.isConfigured) {
+      const presigned = await getPresignedR2UploadUrl({
+        storageKey,
+        mimeType,
+        fileSize: size,
+        ttlSeconds: 600
+      });
+
+      return res.json({
+        success: true,
+        uploadUrl: presigned.uploadUrl,
+        storageKey: presigned.storageKey,
+        expiresIn: presigned.expiresIn,
+        storageProvider: 'r2'
+      });
+    }
+
+    // Jika R2 belum dikonfigurasi, periksa apakah fallback lokal diizinkan
+    if (!isLocalStorageFallbackAllowed()) {
+      return res.status(503).json({
+        success: false,
+        error: "Cloudflare R2 belum dikonfigurasi dan fallback lokal dinonaktifkan di lingkungan staging/production."
+      });
+    }
+
+    return res.json({
+      success: true,
+      storageKey,
+      uploadUrl: "/api/ai/process-multimodal-evidence",
+      expiresIn: 3600,
+      storageProvider: 'local'
+    });
+  } catch (err: any) {
+    console.error("Error generating presigned upload URL:", err);
+    res.status(500).json({ success: false, error: err.message || "Gagal membuat presigned upload URL." });
+  }
+});
+
+// -------------------------------------------------------------
+// Endpoint Verifikasi Upload Pasca Presigned PUT (Cloudflare R2)
+// PEMERIKSAAN KEAMANAN 3: Memverifikasi fisik berkas di R2 (HeadObject),
+// ukuran, tipe MIME, dan kepemilikan sebelum menyimpan metadata final.
+// -------------------------------------------------------------
+app.post("/api/storage/verify-upload", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const {
+      storageKey,
+      fileName,
+      category = 'evidence_image',
+      examId,
+      questionId,
+      submissionId,
+      audioDurationSeconds
+    } = req.body;
+
+    if (!storageKey) {
+      return res.status(400).json({ success: false, error: "storageKey wajib disediakan untuk verifikasi upload." });
+    }
+
+    // 1. Validasi Kepemilikan (Siswa hanya boleh memverifikasi berkas miliknya sendiri)
+    if (authUser.role === 'siswa') {
+      const isOwner = storageKey.includes(authUser.nis || '') ||
+                      storageKey.includes(authUser.id) ||
+                      storageKey.includes(`students/${authUser.nis}`) ||
+                      storageKey.includes(`students/${authUser.id}`);
+      if (!isOwner) {
+        return res.status(403).json({
+          success: false,
+          error: "Akses ditolak. Anda tidak berhak memverifikasi berkas dengan kepemilikan siswa lain."
+        });
+      }
+    } else if (authUser.role === 'guru') {
+      if (authUser.schoolId && !storageKey.includes('school-general')) {
+        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        if (!storageKey.includes(`schools/${cleanSchool}`)) {
+          return res.status(403).json({
+            success: false,
+            error: "Akses ditolak. Anda tidak berhak memverifikasi berkas dari sekolah lain."
+          });
+        }
+      }
+    }
+
+    // 2. Verifikasi Fisik Berkas di Cloudflare R2 (HeadObject)
+    const verification = await verifyR2UploadedObject(storageKey, {
+      expectedMimeType: req.body.mimeType
+    });
+
+    if (!verification.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Verifikasi gagal: Berkas tidak ditemukan di Cloudflare R2. Pastikan upload PUT browser telah selesai."
+      });
+    }
+
+    // 3. Validasi Ukuran Berkas (> 0 bytes dan <= 25 MB)
+    if (verification.contentLength <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Verifikasi gagal: Berkas di Cloudflare R2 kosong (0 bytes)."
+      });
+    }
+
+    if (verification.contentLength > 25 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        error: "Verifikasi gagal: Ukuran berkas di Cloudflare R2 melebihi batas 25MB."
+      });
+    }
+
+    // 4. Validasi Tipe MIME
+    const allowedMimePrefixes = ['image/', 'audio/', 'application/pdf', 'text/'];
+    const isAllowedMime = allowedMimePrefixes.some(prefix => verification.contentType.startsWith(prefix));
+    if (!isAllowedMime && verification.contentType !== 'application/octet-stream') {
+      return res.status(400).json({
+        success: false,
+        error: `Verifikasi gagal: Tipe konten '${verification.contentType}' tidak diizinkan.`
+      });
+    }
+
+    // 5. Simpan / Finalisasi Metadata di Database
+    const db = getDb();
+    if (!db.evidenceMetadata) {
+      db.evidenceMetadata = [];
+    }
+
+    const fileId = `file-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const cleanFileName = fileName || path.basename(storageKey);
+    const metaEntry: EvidenceMetadata = {
+      id: req.body.fileId || fileId,
+      examId: examId || '',
+      questionId: questionId || 'general',
+      studentNis: authUser.nis || '',
+      studentName: authUser.name || '',
+      schoolId: authUser.schoolId,
+      modalityType: category.includes('audio') ? 'audio' : category.includes('image') ? 'handwriting' : 'document',
+      fileName: cleanFileName,
+      fileSize: verification.contentLength,
+      mimeType: verification.contentType,
+      storageKey,
+      storagePath: storageKey,
+      storageUrl: `/api/evidence/r2/${encodeURIComponent(storageKey)}`,
+      storageProvider: 'r2',
+      fileHash: verification.eTag || '',
+      audioDurationSeconds: Number(audioDurationSeconds) || undefined,
+      isArchived: true,
+      uploadTime: new Date().toISOString(),
+      extractedText: req.body.extractedText || undefined,
+      extractionStatus: req.body.extractedText ? 'completed' : 'saved',
+      qualityStatus: 'pass',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const existingIdx = db.evidenceMetadata.findIndex(m => m.id === metaEntry.id || m.storageKey === storageKey);
+    if (existingIdx >= 0) {
+      db.evidenceMetadata[existingIdx] = { ...db.evidenceMetadata[existingIdx], ...metaEntry };
+    } else {
+      db.evidenceMetadata.push(metaEntry);
+    }
+    saveDb(db);
+
+    return res.json({
+      success: true,
+      verified: true,
+      metadata: metaEntry,
+      message: "Verifikasi berkas di Cloudflare R2 berhasil dan metadata final telah tersimpan."
+    });
+  } catch (err: any) {
+    console.error("Error in verify-upload:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Gagal memverifikasi berkas di Cloudflare R2."
+    });
+  }
+});
+
+// -------------------------------------------------------------
+// Endpoint Presigned Download URL (Cloudflare R2 Secure Read)
+// -------------------------------------------------------------
+app.post("/api/storage/presigned-download", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const { storageKey } = req.body;
+
+    if (!storageKey) {
+      return res.status(400).json({ success: false, error: "storageKey wajib disediakan." });
+    }
+
+    // Otorisasi
+    if (authUser.role === 'siswa') {
+      const isOwner = storageKey.includes(authUser.nis || '') ||
+                      storageKey.includes(authUser.id) ||
+                      storageKey.includes(`students/${authUser.nis}`) ||
+                      storageKey.includes(`students/${authUser.id}`);
+      if (!isOwner) {
+        return res.status(403).json({
+          success: false,
+          error: "Akses ditolak. Anda tidak berhak membaca berkas siswa lain."
+        });
+      }
+    } else if (authUser.role === 'guru') {
+      if (authUser.schoolId && !storageKey.includes('school-general')) {
+        const cleanSchool = authUser.schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        if (!storageKey.includes(`schools/${cleanSchool}`)) {
+          return res.status(403).json({
+            success: false,
+            error: "Akses ditolak. Anda tidak berhak mengakses berkas dari sekolah lain."
+          });
+        }
+      }
+    }
+
+    const r2Config = getR2Config();
+    if (r2Config.isConfigured) {
+      const downloadUrl = await getPresignedR2DownloadUrl(storageKey, 900);
+      return res.json({
+        success: true,
+        downloadUrl,
+        expiresIn: 900,
+        storageProvider: 'r2'
+      });
+    }
+
+    // Jika R2 belum dikonfigurasi, periksa apakah fallback lokal diizinkan
+    if (!isLocalStorageFallbackAllowed()) {
+      return res.status(503).json({
+        success: false,
+        error: "Cloudflare R2 belum dikonfigurasi dan fallback penyimpanan lokal dinonaktifkan."
+      });
+    }
+
+    // Hasilkan scoped file token untuk streaming lokal tanpa membocorkan JWT utama
+    const scopedToken = generateScopedFileToken({
+      userId: authUser.id,
+      role: authUser.role,
+      schoolId: authUser.schoolId,
+      storageKey,
+      expiresInSeconds: 300
+    });
+
+    return res.json({
+      success: true,
+      downloadUrl: `/api/evidence/r2/${encodeURIComponent(storageKey)}?fileToken=${scopedToken}`,
+      fileToken: scopedToken,
+      expiresIn: 300,
+      storageProvider: 'local'
+    });
+  } catch (err: any) {
+    console.error("Error generating presigned download URL:", err);
+    res.status(500).json({ success: false, error: err.message || "Gagal membuat presigned download URL." });
+  }
+});
+
+// -------------------------------------------------------------
+// Endpoint Penghapusan Berkas Storage (Cloudflare R2 & Lokal)
+// -------------------------------------------------------------
+app.delete("/api/storage/file", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const { storageKey, fileId } = req.body;
+
+    if (!storageKey && !fileId) {
+      return res.status(400).json({ success: false, error: "storageKey atau fileId wajib disediakan." });
+    }
+
+    if (authUser.role === 'siswa') {
+      if (storageKey) {
+        const isOwner = storageKey.includes(authUser.nis || '') ||
+                        storageKey.includes(authUser.id) ||
+                        storageKey.includes(`students/${authUser.nis}`) ||
+                        storageKey.includes(`students/${authUser.id}`);
+        if (!isOwner) {
+          return res.status(403).json({ success: false, error: "Akses ditolak. Anda tidak berhak menghapus berkas ini." });
+        }
+      }
+    }
+
+    let targetKey = storageKey;
+    const db = getDb();
+
+    if (db.evidenceMetadata) {
+      const foundIdx = db.evidenceMetadata.findIndex(m => m.id === fileId || m.storageKey === storageKey);
+      if (foundIdx >= 0) {
+        targetKey = targetKey || db.evidenceMetadata[foundIdx].storageKey;
+        db.evidenceMetadata.splice(foundIdx, 1);
+        saveDb(db);
+      }
+    }
+
+    if (targetKey) {
+      await deleteR2Object(targetKey);
+    }
+
+    return res.json({
+      success: true,
+      message: "Berkas berhasil dihapus dari penyimpanan arsip."
+    });
+  } catch (err: any) {
+    console.error("Error deleting storage file:", err);
+    res.status(500).json({ success: false, error: err.message || "Gagal menghapus berkas." });
   }
 });
 
@@ -4898,4 +5551,7 @@ process.on("SIGTERM", () => {
   aiQueueManager.stopWorker();
   process.exit(0);
 });
+
+export { app };
+export default app;
 
