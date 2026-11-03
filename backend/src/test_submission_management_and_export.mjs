@@ -701,6 +701,7 @@ async function runTests() {
 
     // 2. GET /api/submissions (Default active)
     const getSubsA = await httpRequest('GET', '/api/submissions', { Authorization: `Bearer ${tokenTeacherA}` });
+    console.log('DEBUG getSubsA status:', getSubsA.status, 'body:', JSON.stringify(getSubsA.json));
     assert(getSubsA.status === 200, 'GET /api/submissions returns HTTP 200');
     assert(getSubsA.json?.submissions?.length === 2, 'Teacher A only sees 2 submissions from School Alpha (Cross-tenant isolated)');
 

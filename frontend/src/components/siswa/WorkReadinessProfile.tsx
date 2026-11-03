@@ -397,6 +397,7 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
   // Auto-fetch full submission detail if bootstrap stripped answers & dimensionScores are missing
   const [detailSubMap, setDetailSubMap] = useState<Record<string, ExamSubmission>>({});
   const rawTechSub = techSubmissions[0];
+  const rawEmpSub = empSubmissions[0];
 
   useEffect(() => {
     if (!rawTechSub?.id) return;
@@ -413,7 +414,23 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
     }
   }, [rawTechSub?.id]);
 
+  useEffect(() => {
+    if (!rawEmpSub?.id) return;
+    const hasDims = rawEmpSub.dimensionScores && Object.keys(rawEmpSub.dimensionScores).length >= 9;
+    const hasAnswers = rawEmpSub.answers && Object.keys(rawEmpSub.answers).length > 0;
+    if (!hasDims && !hasAnswers && !detailSubMap[rawEmpSub.id]) {
+      apiGet<{ success: boolean; submission: ExamSubmission }>(`/api/submissions/${rawEmpSub.id}`)
+        .then(res => {
+          if (res?.success && res.submission) {
+            setDetailSubMap(prev => ({ ...prev, [rawEmpSub.id]: res.submission }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [rawEmpSub?.id]);
+
   const latestTechSub = (rawTechSub && detailSubMap[rawTechSub.id]) ? detailSubMap[rawTechSub.id] : rawTechSub;
+  const latestEmpSub = (rawEmpSub && detailSubMap[rawEmpSub.id]) ? detailSubMap[rawEmpSub.id] : rawEmpSub;
 
   // Compute dynamic scores from actual 24-questions submission if available
   const dynamicTechScores = (latestTechSub?.dimensionScores && Object.keys(latestTechSub.dimensionScores).length >= 6)
@@ -424,11 +441,25 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
 
   const hasValidTechDimensions = Boolean(dynamicTechScores && Object.keys(dynamicTechScores).length >= 6);
 
-  // Compute dynamic scores from actual 18-questions employability non-test submission if available
-  const latestEmpSub = empSubmissions[0];
-  const dynamicEmpEvaluation = (latestEmpSub?.answers && Object.keys(latestEmpSub.answers).length > 0)
+  // 1. Utamakan sembilan skor aspek otoritatif dari backend (dimensionScores)
+  const authoritativeEmpDims = (latestEmpSub?.dimensionScores && Object.keys(latestEmpSub.dimensionScores).length >= 9)
+    ? latestEmpSub.dimensionScores
+    : null;
+
+  // 2. Jika belum ada skor aspek otoritatif, hitung dari answers menggunakan fungsi resmi calculateEmployabilityScore
+  const dynamicEmpEvaluation = (!authoritativeEmpDims && latestEmpSub?.answers && Object.keys(latestEmpSub.answers).length > 0)
     ? calculateEmployabilityScore(latestEmpSub.answers, NON_TEST_QUESTIONS_18)
     : null;
+
+  const authoritativeEmpTotalRaw = authoritativeEmpDims
+    ? Object.values(authoritativeEmpDims).reduce((acc: number, d: any) => acc + (typeof d.raw === 'number' ? d.raw : 0), 0)
+    : (dynamicEmpEvaluation ? dynamicEmpEvaluation.totalRawScore : null);
+
+  const authoritativeEmpCategory = authoritativeEmpDims
+    ? (authoritativeEmpTotalRaw !== null
+        ? (authoritativeEmpTotalRaw >= 73 ? 'Sangat tinggi' : authoritativeEmpTotalRaw >= 59 ? 'Tinggi' : authoritativeEmpTotalRaw >= 46 ? 'Sedang' : authoritativeEmpTotalRaw >= 24 ? 'Rendah' : 'Sangat rendah')
+        : 'Sedang')
+    : (dynamicEmpEvaluation?.category || null);
 
   // 1. Radar Data: 6 Dimensi Kemampuan Teknis Kimia (Tes 24 Soal, Skor Maksimum 65)
   // TIDAK MENGGUNAKAN FALLBACK SINTETIS (* 1.05, * 0.95, dll). Hanya nilai server / skor mentah sah.
@@ -485,13 +516,29 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
 
   // 2. Radar Data: 9 Aspek Employability Skills (Non-Tes 18 Butir, Skor 1–5, Maks 10 Poin per Aspek)
   const employabilityRadarData = EMPLOYABILITY_ASPECTS.map(asp => {
-    const aspectResult = dynamicEmpEvaluation?.aspectResults.find(ar => ar.aspectId === asp.id);
-    const scoreVal = hasEmpSubmissions
-      ? (aspectResult ? aspectResult.percentage : (dynamicEmpEvaluation ? 0 : studentEmpScore))
-      : 0;
-    const rawVal = hasEmpSubmissions
-      ? (aspectResult ? `${aspectResult.rawScore}/10` : (dynamicEmpEvaluation ? '0/10' : 'Belum dapat dihitung'))
-      : '0/10';
+    let scoreVal = 0;
+    let rawVal = hasEmpSubmissions ? 'Belum dapat dihitung' : '0/10';
+    let category = 'Cukup';
+    let interpretation = '';
+    let isCalculated = false;
+
+    if (authoritativeEmpDims && authoritativeEmpDims[asp.id]) {
+      const dim = authoritativeEmpDims[asp.id];
+      scoreVal = typeof dim.percentage === 'number' ? dim.percentage : (dim.max > 0 ? Math.round((dim.raw / dim.max) * 100) : 0);
+      rawVal = `${dim.raw}/${dim.max || 10}`;
+      category = dim.category || (dim.raw >= 9 ? 'Sangat baik' : dim.raw >= 7 ? 'Baik' : dim.raw >= 5 ? 'Cukup' : dim.raw >= 3 ? 'Kurang' : 'Sangat kurang');
+      interpretation = `Capaian aspek ${asp.name}: ${scoreVal}% (Kategori ${category}).`;
+      isCalculated = true;
+    } else if (dynamicEmpEvaluation) {
+      const aspectResult = dynamicEmpEvaluation.aspectResults.find(ar => ar.aspectId === asp.id);
+      if (aspectResult) {
+        scoreVal = aspectResult.percentage;
+        rawVal = `${aspectResult.rawScore}/10`;
+        category = aspectResult.category;
+        interpretation = aspectResult.interpretation;
+        isCalculated = true;
+      }
+    }
 
     return {
       skill: asp.name.replace('Keterampilan ', ''),
@@ -499,9 +546,9 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
       Student: scoreVal,
       Target: asp.industryTargetPercent,
       rawScore: rawVal,
-      category: aspectResult?.category || 'Cukup',
-      interpretation: aspectResult?.interpretation || '',
-      isCalculated: Boolean(aspectResult)
+      category,
+      interpretation,
+      isCalculated
     };
   });
 
@@ -1596,10 +1643,10 @@ export const WorkReadinessProfile: React.FC<WorkReadinessProfileProps> = ({
 
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-300 flex flex-wrap gap-2 justify-between items-center">
             <div className="flex items-center gap-2">
-              <span>Capaian Employability Non-Tes: <strong className="text-purple-400">{hasEmpSubmissions ? (dynamicEmpEvaluation?.totalRawScore !== undefined ? `${dynamicEmpEvaluation.totalRawScore}/90 (${studentEmpScore}%)` : `${studentEmpScore}% (Belum dapat dihitung mentah)`) : '0/90 (Belum Asesmen)'}</strong></span>
-              {dynamicEmpEvaluation && (
+              <span>Capaian Employability Non-Tes: <strong className="text-purple-400">{hasEmpSubmissions ? (authoritativeEmpTotalRaw !== null ? `${authoritativeEmpTotalRaw}/90 (${studentEmpScore}%)` : `${studentEmpScore}% (Belum dapat dihitung mentah)`) : '0/90 (Belum Asesmen)'}</strong></span>
+              {authoritativeEmpCategory && (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                  Kategori: {dynamicEmpEvaluation.category}
+                  Kategori: {authoritativeEmpCategory}
                 </span>
               )}
             </div>

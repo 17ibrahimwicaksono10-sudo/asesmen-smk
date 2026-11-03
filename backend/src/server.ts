@@ -24,8 +24,8 @@ import {
 } from "./auth";
 import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem, SubmissionAuditLog, EvidenceMetadata } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
-import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
-export { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE, NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE };
+import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore, EMPLOYABILITY_ASPECTS } from "./data/nonTestInstrument";
+export { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE, NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore, EMPLOYABILITY_ASPECTS };
 import {
   evaluateTypedEssayWithDeepSeek,
   evaluateImageWithGeminiVision,
@@ -157,7 +157,7 @@ export function ensureConsistentInitialData(): void {
             if (['A', 'B', 'C', 'D', 'E'].includes(studentPick)) {
               letter = studentPick;
             } else {
-              const match = studentPick.match(/^([A-E])\b/);
+              const match = studentPick.match(/^([A-E])(?:\.|\:|\s|-|\b|$)/i);
               if (match) letter = match[1];
               else if (studentPick.startsWith('A')) letter = 'A';
               else if (studentPick.startsWith('B')) letter = 'B';
@@ -181,6 +181,17 @@ export function ensureConsistentInitialData(): void {
 
           sub.answers = orderedAnswers;
           sub.originalAIScoreTotal = empRes.totalRawScore;
+          const empDimScores: Record<string, { raw: number; max: number; percentage: number; name: string; category?: string }> = {};
+          empRes.aspectResults.forEach(ar => {
+            empDimScores[ar.aspectId] = {
+              raw: ar.rawScore,
+              max: ar.maxRawScore,
+              percentage: ar.percentage,
+              name: ar.aspectName,
+              category: ar.category
+            };
+          });
+          sub.dimensionScores = empDimScores;
 
           changed = true;
         }
@@ -1036,7 +1047,29 @@ app.get("/api/bootstrap", optionalAuth, (req: AuthenticatedRequest, res: Respons
       employabilityScore: s.employabilityScore,
       rawScoreTotal: s.rawScoreTotal,
       maxRawScore: s.maxRawScore,
-      dimensionScores: s.dimensionScores,
+      dimensionScores: (() => {
+        let dScores = s.dimensionScores;
+        const isEmpSub = s.packageId === 'pkg-employability-18' ||
+          s.examTitle?.toLowerCase().includes('employa') ||
+          s.examTitle?.toLowerCase().includes('non-tes') ||
+          (s.answers && Object.keys(s.answers).some(k => k.startsWith('nt-') || k.startsWith('emp-')));
+        if (isEmpSub && (!dScores || Object.keys(dScores).length < 9) && s.answers) {
+          const empRes = calculateEmployabilityScore(s.answers, NON_TEST_QUESTIONS_18);
+          const empDims: Record<string, { raw: number; max: number; percentage: number; name: string; category?: string }> = {};
+          empRes.aspectResults.forEach(ar => {
+            empDims[ar.aspectId] = {
+              raw: ar.rawScore,
+              max: ar.maxRawScore,
+              percentage: ar.percentage,
+              name: ar.aspectName,
+              category: ar.category
+            };
+          });
+          s.dimensionScores = empDims;
+          dScores = empDims;
+        }
+        return dScores;
+      })(),
       originalAIScoreTotal: s.originalAIScoreTotal,
       teacherScoreTotal: s.teacherScoreTotal,
       status: s.status,
@@ -2129,6 +2162,27 @@ app.get("/api/submissions/:id", requireAuth, (req: AuthenticatedRequest, res: Re
   // Bersihkan Base64 jika masih ada
   extractEvidenceBase64FromSubmission(sub);
 
+  // Pastikan skor otoritatif 9 aspek employability terhitung jika answers tersedia
+  const isEmpSub = sub.packageId === 'pkg-employability-18' ||
+    sub.examTitle?.toLowerCase().includes('employa') ||
+    sub.examTitle?.toLowerCase().includes('non-tes') ||
+    (sub.answers && Object.keys(sub.answers).some(k => k.startsWith('nt-') || k.startsWith('emp-')));
+
+  if (isEmpSub && (!sub.dimensionScores || Object.keys(sub.dimensionScores).length < 9) && sub.answers) {
+    const empRes = calculateEmployabilityScore(sub.answers, NON_TEST_QUESTIONS_18);
+    const empDims: Record<string, { raw: number; max: number; percentage: number; name: string; category?: string }> = {};
+    empRes.aspectResults.forEach(ar => {
+      empDims[ar.aspectId] = {
+        raw: ar.rawScore,
+        max: ar.maxRawScore,
+        percentage: ar.percentage,
+        name: ar.aspectName,
+        category: ar.category
+      };
+    });
+    sub.dimensionScores = empDims;
+  }
+
   const isTeacherOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'guru');
   const safeSubmission = {
     ...sub,
@@ -2658,7 +2712,13 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     submission.packageId === 'pkg-employability-18' ||
     submission.packageTitle?.toLowerCase().includes('employability') ||
     submission.packageTitle?.toLowerCase().includes('non-tes') ||
-    canonicalQuestions.some(q => (q as any).scoringMap);
+    submission.examTitle?.toLowerCase().includes('employability') ||
+    submission.examTitle?.toLowerCase().includes('non-tes') ||
+    (canonicalQuestions && canonicalQuestions.some(q => (q as any).scoringMap));
+
+  if (isEmployability && (!canonicalQuestions || canonicalQuestions.length === 0 || !canonicalQuestions.some(q => (q as any).aspectId))) {
+    canonicalQuestions = NON_TEST_QUESTIONS_18;
+  }
 
   const isTeacherValidated = submission.validationStatus === 'approved' || submission.validationStatus === 'revised' || Boolean(submission.validatedBy) || Boolean(submission.isTeacherValidated);
 
@@ -2697,7 +2757,7 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
         if (['A', 'B', 'C', 'D', 'E'].includes(studentPick)) {
           letter = studentPick;
         } else {
-          const match = studentPick.match(/^([A-E])\b/);
+          const match = studentPick.match(/^([A-E])(?:\.|\:|\s|-|\b|$)/i);
           if (match) letter = match[1];
           else if (studentPick.startsWith('A')) letter = 'A';
           else if (studentPick.startsWith('B')) letter = 'B';
@@ -2921,6 +2981,54 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
   if (isEmployability) {
     submission.employabilityScore = finalPercentage;
     submission.technicalScore = 0;
+
+    // 6A. Hitung Skor Agregasi Otoritatif 9 Aspek Employability Skills (Non-Tes 18 Butir)
+    const employabilityDimensionScores: Record<string, { raw: number; max: number; percentage: number; name: string; category?: string }> = {
+      komunikasi: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Komunikasi' },
+      kerjasama: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Kerja Sama' },
+      pemecahan_masalah: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Pemecahan Masalah' },
+      inisiatif_kewirausahaan: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Inisiatif dan Kewirausahaan' },
+      perencanaan_pengorganisasian: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Perencanaan dan Pengorganisasian' },
+      manajemen_diri: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Manajemen Diri' },
+      belajar: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Belajar' },
+      teknologi: { raw: 0, max: 10, percentage: 0, name: 'Keterampilan Teknologi' },
+      k3: { raw: 0, max: 10, percentage: 0, name: 'Keselamatan dan Kesehatan Kerja' }
+    };
+
+    canonicalQuestions.forEach((q, idx) => {
+      let aspectId = (q as any).aspectId || q.dimensionId;
+      if (!aspectId) {
+        const num = q.number || (idx + 1);
+        if (num >= 1 && num <= 2) aspectId = 'komunikasi';
+        else if (num >= 3 && num <= 4) aspectId = 'kerjasama';
+        else if (num >= 5 && num <= 6) aspectId = 'pemecahan_masalah';
+        else if (num >= 7 && num <= 8) aspectId = 'inisiatif_kewirausahaan';
+        else if (num >= 9 && num <= 10) aspectId = 'perencanaan_pengorganisasian';
+        else if (num >= 11 && num <= 12) aspectId = 'manajemen_diri';
+        else if (num >= 13 && num <= 14) aspectId = 'belajar';
+        else if (num >= 15 && num <= 16) aspectId = 'teknologi';
+        else if (num >= 17 && num <= 18) aspectId = 'k3';
+      }
+
+      if (aspectId && employabilityDimensionScores[aspectId]) {
+        const ans = enrichedAnswers[q.id];
+        const qScore = (ans && typeof ans.score === 'number') ? ans.score : 0;
+        employabilityDimensionScores[aspectId].raw += qScore;
+      }
+    });
+
+    Object.keys(employabilityDimensionScores).forEach(aspKey => {
+      const asp = employabilityDimensionScores[aspKey];
+      asp.percentage = asp.max > 0 ? Math.round((asp.raw / asp.max) * 100) : 0;
+      if (asp.raw === 0) asp.category = 'Sangat kurang';
+      else if (asp.raw >= 9) asp.category = 'Sangat baik';
+      else if (asp.raw >= 7) asp.category = 'Baik';
+      else if (asp.raw >= 5) asp.category = 'Cukup';
+      else if (asp.raw >= 3) asp.category = 'Kurang';
+      else asp.category = 'Sangat kurang';
+    });
+
+    submission.dimensionScores = employabilityDimensionScores;
   } else {
     submission.technicalScore = finalPercentage;
     submission.employabilityScore = 0;

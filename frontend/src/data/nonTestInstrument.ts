@@ -567,22 +567,22 @@ export function calculateEmployabilityScore(
     const nonTestQ = NON_TEST_QUESTIONS_18.find(nq => nq.id === q.id || nq.code === q.code || nq.number === q.number) || (q as NonTestQuestionItem);
     const aspectId = nonTestQ.aspectId || 'komunikasi';
 
-    const studentAns = answersState[q.id];
+    const studentAns = answersState[q.id] ||
+      (q.code ? answersState[q.code] : undefined) ||
+      (q.number ? answersState[`q-${q.number}`] : undefined) ||
+      (q.number ? answersState[String(q.number)] : undefined);
     let selectedOptionLetter = '';
 
     if (studentAns) {
       const opt = studentAns.selectedOption || studentAns.answer || '';
       if (typeof opt === 'string') {
-        const match = opt.match(/^([A-E])[.s]/);
+        const cleanOpt = opt.trim();
+        const match = cleanOpt.match(/^([A-E])(?:\.|\:|\s|-|\b|$)/i);
         if (match) {
-          selectedOptionLetter = match[1];
-        } else if (['A', 'B', 'C', 'D', 'E'].includes(opt.trim().toUpperCase())) {
-          selectedOptionLetter = opt.trim().toUpperCase();
-        } else if (opt.startsWith('A.')) selectedOptionLetter = 'A';
-        else if (opt.startsWith('B.')) selectedOptionLetter = 'B';
-        else if (opt.startsWith('C.')) selectedOptionLetter = 'C';
-        else if (opt.startsWith('D.')) selectedOptionLetter = 'D';
-        else if (opt.startsWith('E.')) selectedOptionLetter = 'E';
+          selectedOptionLetter = match[1].toUpperCase();
+        } else if (['A', 'B', 'C', 'D', 'E'].includes(cleanOpt.toUpperCase())) {
+          selectedOptionLetter = cleanOpt.toUpperCase();
+        }
       }
     }
 
