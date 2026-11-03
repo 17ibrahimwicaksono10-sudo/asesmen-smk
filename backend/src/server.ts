@@ -28,6 +28,7 @@ import {
   evaluateImageWithGeminiVision,
   evaluateAudioWithGeminiSTTAndDeepSeek,
   evaluateStudentAnswerStandard,
+  getGeminiConfig,
   QuestionEvaluationContext,
   StandardAIEvaluationResult
 } from "./aiEvaluationRouter";
@@ -2113,7 +2114,13 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
 
     let earnedScore = 0;
 
-    if (q.type === 'multiple_choice') {
+    const isMCQ = q.type === 'multiple_choice';
+    const isComplexMCQ = q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice';
+    const isMatching = q.type === 'matching';
+    const isShortAnswer = q.type === 'short_answer';
+    const isAutoScored = isMCQ || isComplexMCQ || isMatching || (isShortAnswer && Boolean(q.shortAnswerKey));
+
+    if (isMCQ) {
       const scoringMap = (q as any).scoringMap;
       const studentPick = (qAns.selectedOption || '').toString().trim().toUpperCase();
 
@@ -2138,16 +2145,66 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
         earnedScore = (studentPick && (studentPick === correctPick || studentPick.slice(0, 1) === correctPick.slice(0, 1))) ? (q.points || 1) : 0;
       }
       autoScoreTotal += earnedScore;
-    } else if (q.type === 'complex_mcq') {
-      if (Array.isArray(qAns.selectedOptions)) {
-        const studentLetters = qAns.selectedOptions.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
-        const correctLetters = (q.correctAnswers || []).map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
-        let matchCount = 0;
-        studentLetters.forEach((letter: string) => {
-          if (correctLetters.includes(letter)) matchCount++;
+    } else if (isComplexMCQ) {
+      if (Array.isArray(qAns.selectedOptions) && qAns.selectedOptions.length > 0) {
+        const correctAnswers = q.correctAnswers || [];
+        const options = q.options || [];
+
+        const getOptionIndex = (val: string): number => {
+          const cleanVal = (val || '').trim();
+          if (!cleanVal) return -1;
+          const idx = options.findIndex((opt: any) => {
+            const optStr = typeof opt === 'string' ? opt : (opt?.text || '');
+            return optStr.trim().toLowerCase() === cleanVal.toLowerCase();
+          });
+          if (idx >= 0) return idx;
+          const letterMatch = cleanVal.match(/^([A-E])(?:\.|\:|\s|$)/i);
+          if (letterMatch) {
+            return letterMatch[1].toUpperCase().charCodeAt(0) - 65;
+          }
+          const stripped = cleanVal.replace(/^[A-E][.):\s]+/i, '').trim().toLowerCase();
+          if (stripped) {
+            const idx2 = options.findIndex((opt: any) => {
+              const optStr = typeof opt === 'string' ? opt : (opt?.text || '');
+              return optStr.replace(/^[A-E][.):\s]+/i, '').trim().toLowerCase() === stripped;
+            });
+            if (idx2 >= 0) return idx2;
+          }
+          return -1;
+        };
+
+        const targetIndices = new Set<number>();
+        correctAnswers.forEach((ans: string) => {
+          const idx = getOptionIndex(ans);
+          if (idx >= 0) targetIndices.add(idx);
         });
-        const ratio = correctLetters.length > 0 ? matchCount / correctLetters.length : 0;
-        earnedScore = Math.round(ratio * qMax);
+
+        const studentIndices = new Set<number>();
+        qAns.selectedOptions.forEach((ans: string) => {
+          const idx = getOptionIndex(ans);
+          if (idx >= 0) studentIndices.add(idx);
+        });
+
+        let matchCount = 0;
+        studentIndices.forEach(idx => {
+          if (targetIndices.has(idx)) matchCount++;
+        });
+
+        if (targetIndices.size === 0 && correctAnswers.length > 0) {
+          const correctLetters = correctAnswers.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
+          const studentLetters = qAns.selectedOptions.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
+          studentLetters.forEach(l => {
+            if (correctLetters.includes(l)) matchCount++;
+          });
+          const ratio = correctLetters.length > 0 ? matchCount / correctLetters.length : 0;
+          earnedScore = Math.round(ratio * qMax);
+        } else {
+          const totalTarget = targetIndices.size > 0 ? targetIndices.size : (correctAnswers.length || 1);
+          const wrongCount = studentIndices.size - matchCount;
+          const netMatch = Math.max(0, matchCount - (wrongCount > 0 ? 0.5 * wrongCount : 0));
+          const ratio = netMatch / totalTarget;
+          earnedScore = Math.min(qMax, Math.max(0, Math.round(ratio * qMax)));
+        }
       } else if (q.statements && qAns.complexAnswers) {
         let correctCount = 0;
         q.statements.forEach(stmt => {
@@ -2156,7 +2213,7 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
         earnedScore = Math.round((correctCount / q.statements.length) * qMax);
       }
       autoScoreTotal += earnedScore;
-    } else if (q.type === 'matching' && q.matchingColumnA) {
+    } else if (isMatching && q.matchingColumnA) {
       let correctCount = 0;
       q.matchingColumnA.forEach(m => {
         const studentVal = (qAns.matchingAnswers && qAns.matchingAnswers[m.id] || '').trim();
@@ -2165,7 +2222,7 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
       });
       earnedScore = correctCount;
       autoScoreTotal += earnedScore;
-    } else if (q.type === 'short_answer') {
+    } else if (isShortAnswer) {
       const val = (qAns.shortAnswerText || '').toString().trim().replace(',', '.');
       const calc = (qAns.shortAnswerCalculation || '').toString().toLowerCase();
 
@@ -2194,11 +2251,18 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     }
 
     totalRawScore += earnedScore;
+    const finalScore = typeof qAns.score === 'number'
+      ? Math.min(qMax, Math.max(0, qAns.score))
+      : (isAutoScored ? earnedScore : undefined);
+
     enrichedAnswers[q.id] = {
       ...qAns,
-      score: typeof qAns.score === 'number' ? Math.min(qMax, Math.max(0, qAns.score)) : undefined,
+      selectedOptions: Array.isArray(qAns.selectedOptions)
+        ? qAns.selectedOptions
+        : (qAns.selectedOption ? [qAns.selectedOption] : undefined),
+      score: finalScore,
       maxScore: qMax,
-      isPendingEvaluation: typeof qAns.score !== 'number' && (q.type === 'essay' || q.type === 'analisis_kasus' || q.type === 'short_answer' || (qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0))
+      isPendingEvaluation: finalScore === undefined && (q.type === 'essay' || q.type === 'analisis_kasus' || (qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0))
     };
   });
 
@@ -3548,13 +3612,15 @@ Berikan JSON:
     : `Ekstrak dan kelompokkan isi dokumen kerja ini ke dalam teks ringkas yang terstruktur.`;
 
   let aiWorked = false;
-  const dbSettings = (getDb().settings as any) || {};
-  const apiKey = dbSettings.geminiApiKey || process.env.GEMINI_API_KEY;
-  const geminiBaseUrl = (dbSettings.geminiBaseUrl || process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+  const geminiConfig = getGeminiConfig();
+  const apiKey = geminiConfig.apiKey;
+  const geminiBaseUrl = geminiConfig.baseUrl;
+  const candidateModels = geminiConfig.candidateModels;
+  let isGeoRestricted = false;
+
   if (rawFileData && apiKey) {
     const base64Clean = rawFileData.replace(/^data:[^;]+;base64,/, "");
     const mimeType = rawFileData.split(";")[0]?.replace("data:", "") || (isAudio ? "audio/webm" : "image/jpeg");
-    const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"];
 
     for (const model of candidateModels) {
       if (aiWorked) break;
@@ -3582,6 +3648,10 @@ Berikan JSON:
             const errJson = await res.json().catch(() => ({}));
             const errMsg = (errJson as any)?.error?.message || res.statusText;
             console.warn(`[Multimodal AI] Model ${model} attempt ${attempt} returned status ${res.status}: ${errMsg}`);
+            if (res.status === 400 && (errMsg.includes('User location is not supported') || errMsg.includes('location'))) {
+              isGeoRestricted = true;
+              break;
+            }
             if (res.status === 503 || res.status === 429) {
               await new Promise(r => setTimeout(r, 1500));
               continue;
@@ -3617,7 +3687,9 @@ Berikan JSON:
     extractedText = "";
     qualityStatus = "fail";
     qualityIssues.push(
-      isAudio
+      isGeoRestricted
+        ? "Layanan Gemini API dibatasi wilayah geografis server VPS (Geo-restricted). Berkas asli tersimpan aman untuk diperiksa langsung oleh Guru."
+        : isAudio
         ? "Ekstraksi STT otomatis belum berhasil mengurai audio atau layanan multimodal offline. Berkas rekaman asli tersimpan untuk diperiksa langsung oleh Guru."
         : isHandwriting
         ? "Ekstraksi OCR otomatis belum berhasil membaca tulisan tangan atau layanan multimodal offline. Berkas foto asli tersimpan untuk diperiksa langsung oleh Guru."

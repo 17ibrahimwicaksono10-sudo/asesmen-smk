@@ -818,7 +818,7 @@ export const PackageMaster: React.FC<PackageMasterProps> = ({
                       )}
 
                       {/* Statements Breakdown for complex_mcq */}
-                      {q.type === 'complex_mcq' && q.statements && (
+                      {(q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice') && q.statements && (
                         <div className="pl-8 space-y-2 pt-1">
                           <div className="text-[11px] font-bold text-purple-400">Daftar Pernyataan Pilihan Ganda Kompleks:</div>
                           {q.statements.map((stmt) => (
@@ -829,6 +829,36 @@ export const PackageMaster: React.FC<PackageMasterProps> = ({
                               </span>
                             </div>
                           ))}
+                        </div>
+                      )}
+
+                      {/* Options & Correct Answers Breakdown for complex_mcq multi-select */}
+                      {(q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice') && q.options && q.options.length > 0 && (
+                        <div className="pl-8 space-y-2 pt-1">
+                          <div className="text-[11px] font-bold text-indigo-400">Daftar Alternatif Jawaban Pilihan Ganda Kompleks (Multi-Select Checkbox):</div>
+                          <div className="grid grid-cols-1 gap-1.5">
+                            {q.options.map((opt: string, optIdx: number) => {
+                              const letter = String.fromCharCode(65 + optIdx);
+                              const isCorrect = Array.isArray(q.correctAnswers) && q.correctAnswers.some((ca: string) => {
+                                const cClean = ca.trim().toUpperCase();
+                                const optClean = opt.trim().toUpperCase();
+                                return cClean === optClean || cClean === letter || optClean.startsWith(cClean);
+                              });
+                              return (
+                                <div key={optIdx} className={`p-2 rounded-lg text-xs flex justify-between items-center gap-2 border ${isCorrect ? 'bg-emerald-950/40 border-emerald-500/60 text-emerald-200' : 'bg-slate-900 border-slate-800 text-slate-300'}`}>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[10px] ${isCorrect ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>{letter}</span>
+                                    <span>{opt}</span>
+                                  </div>
+                                  {isCorrect && (
+                                    <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold shrink-0">
+                                      ✓ Kunci Jawaban
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
                       )}
 
