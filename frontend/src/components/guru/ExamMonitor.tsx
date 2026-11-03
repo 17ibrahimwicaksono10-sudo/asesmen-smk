@@ -31,7 +31,8 @@ import {
   FileCheck,
   Check,
   Hash,
-  BookOpen
+  BookOpen,
+  Clock
 } from 'lucide-react';
 import { MultimodalReviewModal } from '../common/MultimodalReviewModal';
 
@@ -615,8 +616,14 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               <span className="font-semibold text-emerald-300 block mb-0.5">Soal #{eIdx + 1} ({qKey}):</span>
                               <p className="text-slate-300 text-[11px] leading-relaxed">{evalItem.feedback || 'Dievaluasi berdasarkan rubrik kompetensi.'}</p>
                             </div>
-                            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-xs shrink-0">
-                              Skor: {evalItem.score} / {evalItem.maxScore}
+                            <span className={`px-2 py-0.5 rounded font-bold text-xs shrink-0 ${
+                              evalItem.score !== null && evalItem.score !== undefined && !evalItem.isPendingEvaluation
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            }`}>
+                              {evalItem.score !== null && evalItem.score !== undefined && !evalItem.isPendingEvaluation
+                                ? `Skor: ${evalItem.score} / ${evalItem.maxScore}`
+                                : 'Belum Dinilai'}
                             </span>
                           </div>
                         ))}
@@ -704,7 +711,8 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                     );
 
                     const maxQuestionPoints = ans.maxScore || qItem?.points || 10;
-                    const currentQuestionScore = ans.score || 0;
+                    const isPending = ans.isPendingEvaluation || ans.score === undefined || ans.score === null;
+                    const currentQuestionScore = ans.score ?? 0;
 
                     return (
                       <div key={qKey} className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
@@ -724,6 +732,11 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                             <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-bold flex items-center gap-1">
                               <AlertTriangle className="w-3 h-3 text-rose-400" />
                               Tidak Dijawab (0 / {maxQuestionPoints})
+                            </span>
+                          ) : isPending ? (
+                            <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-bold flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-amber-400" />
+                              Belum Dinilai (Menunggu Evaluasi)
                             </span>
                           ) : (
                             <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold">
@@ -905,7 +918,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                             </div>
                           )}
 
-                          {Array.isArray(ans.selectedOptions) && ans.selectedOptions.length > 0 && (
+                          {(qItem?.type === 'complex_mcq' || qItem?.type === 'pilihan_ganda_kompleks' || qItem?.type === 'complex_multiple_choice') && Array.isArray(ans.selectedOptions) && ans.selectedOptions.length > 0 && (
                             <div className="p-2.5 rounded bg-slate-900 border border-slate-800 space-y-1.5">
                               <div className="flex items-center justify-between">
                                 <strong className="text-slate-300 text-xs flex items-center gap-1.5">
@@ -1309,8 +1322,14 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                                 <span className="font-semibold text-emerald-300 block mb-0.5">Soal #{eIdx + 1} ({qKey}):</span>
                                 <p className="text-slate-300 text-[11px] leading-relaxed">{evalItem.feedback || 'Dievaluasi berdasarkan rubrik kompetensi.'}</p>
                               </div>
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-xs shrink-0">
-                                Skor: {evalItem.score} / {evalItem.maxScore}
+                              <span className={`px-2 py-0.5 rounded font-bold text-xs shrink-0 ${
+                                evalItem.score !== null && evalItem.score !== undefined && !evalItem.isPendingEvaluation
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              }`}>
+                                {evalItem.score !== null && evalItem.score !== undefined && !evalItem.isPendingEvaluation
+                                  ? `Skor: ${evalItem.score} / ${evalItem.maxScore}`
+                                  : 'Belum Dinilai'}
                               </span>
                             </div>
                           ))}
@@ -1354,7 +1373,8 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                   );
 
                   const maxQuestionPoints = ans.maxScore || qItem?.points || 10;
-                  const currentQuestionScore = ans.score || 0;
+                  const isPending = ans.isPendingEvaluation || ans.score === undefined || ans.score === null;
+                  const currentQuestionScore = ans.score ?? 0;
 
                   const qNum = qItem?.number ?? (idx + 1);
 
@@ -1387,6 +1407,11 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                             <span className="px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-bold flex items-center gap-1.5">
                               <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
                               ⚠️ Tidak Dijawab (Skor: 0 / {maxQuestionPoints})
+                            </span>
+                          ) : isPending ? (
+                            <span className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5">
+                              <Clock className="w-3.5 h-3.5 text-amber-400" />
+                              Belum Dinilai (Menunggu Evaluasi)
                             </span>
                           ) : (
                             <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-bold flex items-center gap-1">
@@ -1535,7 +1560,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               </div>
                             )}
 
-                            {ans.selectedOptions && ans.selectedOptions.length > 0 && (
+                            {(qItem?.type === 'complex_mcq' || qItem?.type === 'pilihan_ganda_kompleks' || qItem?.type === 'complex_multiple_choice') && ans.selectedOptions && ans.selectedOptions.length > 0 && (
                               <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
                                 <span className="text-[11px] font-bold text-slate-400 uppercase">Pilihan Ganda Kompleks (Checkbox Terpilih):</span>
                                 <div className="space-y-1">

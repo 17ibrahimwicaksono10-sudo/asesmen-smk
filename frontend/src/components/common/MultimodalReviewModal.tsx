@@ -691,7 +691,7 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
                     </div>
                   )}
 
-                  {Array.isArray(selectedAnswer.selectedOptions) && selectedAnswer.selectedOptions.length > 0 && (
+                  {(questionObj?.type === 'complex_mcq' || questionObj?.type === 'pilihan_ganda_kompleks' || questionObj?.type === 'complex_multiple_choice') && Array.isArray(selectedAnswer.selectedOptions) && selectedAnswer.selectedOptions.length > 0 && (
                     <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-700/80 mt-2 space-y-2">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">

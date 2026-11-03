@@ -23,6 +23,7 @@ import {
 import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, StudentAnswer, ArchivedItem, SystemSettings, MultimodalEvidence, ExtractionArtifact, PortfolioItem } from "./types";
 import { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE } from "./data/revisedQuestions";
 import { NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE, calculateEmployabilityScore } from "./data/nonTestInstrument";
+export { REVISED_QUESTIONS_24, FULL_TECHNICAL_CHEMISTRY_PACKAGE, NON_TEST_QUESTIONS_18, DEFAULT_EMPLOYABILITY_PACKAGE };
 import {
   evaluateTypedEssayWithDeepSeek,
   evaluateImageWithGeminiVision,
@@ -2146,6 +2147,8 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     submission.packageTitle?.toLowerCase().includes('non-tes') ||
     canonicalQuestions.some(q => (q as any).scoringMap);
 
+  const isTeacherValidated = submission.validationStatus === 'approved' || submission.validationStatus === 'revised' || Boolean(submission.validatedBy) || Boolean(submission.isTeacherValidated);
+
   let totalRawScore = 0;
   let maxRawScore = 0;
   let autoScoreTotal = 0;
@@ -2193,7 +2196,15 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
       } else {
         // Pilihan Ganda Teknis Biner
         const correctPick = (q.correctAnswer || '').toString().trim().toUpperCase();
-        earnedScore = (studentPick && (studentPick === correctPick || studentPick.slice(0, 1) === correctPick.slice(0, 1))) ? (q.points || 1) : 0;
+        const studentLetter = studentPick.match(/^([A-E])(?:\.|\:|\s|$)/)?.[1] || studentPick.slice(0, 1);
+        const correctLetter = correctPick.match(/^([A-E])(?:\.|\:|\s|$)/)?.[1] || correctPick.slice(0, 1);
+        const isMatch = Boolean(
+          studentPick && (
+            studentPick === correctPick ||
+            (studentLetter && correctLetter && studentLetter === correctLetter)
+          )
+        );
+        earnedScore = isMatch ? (q.points || 1) : 0;
       }
       autoScoreTotal += earnedScore;
     } else if (isComplexMCQ) {
@@ -2241,20 +2252,26 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
           if (targetIndices.has(idx)) matchCount++;
         });
 
+        // Jika resolusi indeks tidak bekerja karena format teks khusus, gunakan perbandingan huruf awalan
         if (targetIndices.size === 0 && correctAnswers.length > 0) {
           const correctLetters = correctAnswers.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
           const studentLetters = qAns.selectedOptions.map((opt: string) => opt.trim().slice(0, 1).toUpperCase());
           studentLetters.forEach(l => {
             if (correctLetters.includes(l)) matchCount++;
           });
-          const ratio = correctLetters.length > 0 ? matchCount / correctLetters.length : 0;
-          earnedScore = Math.round(ratio * qMax);
+          const targetCount = correctLetters.length;
+          const pointsPerKey = targetCount > 0 ? qMax / targetCount : 0;
+          const excessPicks = Math.max(0, studentLetters.length - correctLetters.length);
+          const netCorrect = Math.max(0, matchCount - excessPicks);
+          earnedScore = Math.min(qMax, Math.round(netCorrect * pointsPerKey * 10) / 10);
         } else {
-          const totalTarget = targetIndices.size > 0 ? targetIndices.size : (correctAnswers.length || 1);
-          const wrongCount = studentIndices.size - matchCount;
-          const netMatch = Math.max(0, matchCount - (wrongCount > 0 ? 0.5 * wrongCount : 0));
-          const ratio = netMatch / totalTarget;
-          earnedScore = Math.min(qMax, Math.max(0, Math.round(ratio * qMax)));
+          // Kebijakan skor proporsional: qMax dibagi jumlah kunci jawaban.
+          // Pinalti tebakan berlebih: jika siswa memilih melebihi jumlah kunci, kurangi poin kelebihan.
+          const targetCount = targetIndices.size;
+          const pointsPerKey = targetCount > 0 ? qMax / targetCount : 0;
+          const excessPicks = Math.max(0, studentIndices.size - targetIndices.size);
+          const netCorrect = Math.max(0, matchCount - excessPicks);
+          earnedScore = Math.min(qMax, Math.round(netCorrect * pointsPerKey * 10) / 10);
         }
       } else if (q.statements && qAns.complexAnswers) {
         let correctCount = 0;
@@ -2267,11 +2284,33 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     } else if (isMatching && q.matchingColumnA) {
       let correctCount = 0;
       q.matchingColumnA.forEach(m => {
-        const studentVal = (qAns.matchingAnswers && qAns.matchingAnswers[m.id] || '').trim();
-        const targetVal = (m.correctMatch || '').trim();
-        if (studentVal && (studentVal === targetVal || studentVal.slice(0, 1) === targetVal.slice(0, 1))) correctCount++;
+        const studentVal = (
+          (qAns.matchingAnswers && (qAns.matchingAnswers[m.id] ?? qAns.matchingAnswers[m.columnAText] ?? qAns.matchingAnswers[m.columnAText?.slice(0, 1)])) ??
+          (Array.isArray((qAns as any).matches) && (qAns as any).matches.find((p: any) => p.from === m.id || p.from === m.columnAText)?.to) ??
+          (Array.isArray((qAns as any).matchingPairs) && (qAns as any).matchingPairs.find((p: any) => p.from === m.id || p.from === m.columnAText || p.left === m.id || p.left === m.columnAText)?.to) ??
+          ''
+        ).toString().trim();
+        const targetVal = (m.correctMatch || '').toString().trim();
+        if (studentVal && targetVal) {
+          const sClean = studentVal.toLowerCase();
+          const tClean = targetVal.toLowerCase();
+          const sNum = studentVal.match(/^([0-9]+)/)?.[1] || studentVal.slice(0, 1);
+          const tNum = targetVal.match(/^([0-9]+)/)?.[1] || targetVal.slice(0, 1);
+          const sText = sClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+          const tText = tClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+
+          if (
+            sClean === tClean ||
+            (sNum && tNum && sNum === tNum) ||
+            (sText && tText && sText === tText)
+          ) {
+            correctCount++;
+          }
+        }
       });
-      earnedScore = correctCount;
+      const totalPairs = q.matchingColumnA.length;
+      const pointsPerPair = totalPairs > 0 ? qMax / totalPairs : 1;
+      earnedScore = Math.min(qMax, Math.round(correctCount * pointsPerPair * 10) / 10);
       autoScoreTotal += earnedScore;
     } else if (isShortAnswer) {
       const val = (qAns.shortAnswerText || '').toString().trim().replace(',', '.');
@@ -2285,35 +2324,66 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
         earnedScore = 0;
       }
       autoScoreTotal += earnedScore;
-    } else if (q.type === 'essay') {
-      if (typeof qAns.score === 'number') {
+    } else {
+      // Komponen esai / subjektif (essay, analisis_kasus, scenario_assessment, dll)
+      // JANGAN PERNAH menerima skor kiriman browser siswa tanpa bukti penilaian sah!
+      const hasValidSubjectiveScore = typeof qAns.score === 'number' &&
+        !qAns.isPendingEvaluation &&
+        (isTeacherValidated || qAns.isTeacherScore || Boolean(qAns.aiRubricScoring) || submission.aiGradingStatus === 'completed');
+
+      if (hasValidSubjectiveScore) {
         earnedScore = Math.min(qMax, Math.max(0, qAns.score));
       } else {
-        // Komponen esai belum dinilai secara sah: JANGAN berikan nilai positif buatan (75%) atau perkiraan!
         earnedScore = 0;
       }
-      essayScoreTotal += earnedScore;
-    } else {
-      if (typeof qAns.score === 'number') {
-        earnedScore = Math.min(qMax, Math.max(0, qAns.score));
-      } else {
-        earnedScore = 0;
+
+      if (q.type === 'essay' || q.type === 'essay_subquestions') {
+        essayScoreTotal += earnedScore;
       }
     }
 
     totalRawScore += earnedScore;
-    const finalScore = typeof qAns.score === 'number'
-      ? Math.min(qMax, Math.max(0, qAns.score))
-      : (isAutoScored ? earnedScore : undefined);
+
+    let finalScore: number | undefined;
+    if (isAutoScored) {
+      // Skor objektif (MCQ, Complex MCQ, Matching, Short Answer dengan kunci)
+      // HARUS 100% dihitung secara deterministik oleh server dari kunci canonical!
+      // JANGAN PERNAH percaya atau menerima qAns.score dari browser siswa!
+      // Pertahankan nilai manual guru hanya jika submission telah divalidasi oleh guru.
+      if (isTeacherValidated && typeof qAns.score === 'number') {
+        finalScore = Math.min(qMax, Math.max(0, qAns.score));
+      } else {
+        finalScore = earnedScore;
+      }
+    } else {
+      // Komponen esai / subjektif
+      const hasValidSubjectiveScore = typeof qAns.score === 'number' &&
+        !qAns.isPendingEvaluation &&
+        (isTeacherValidated || qAns.isTeacherScore || Boolean(qAns.aiRubricScoring) || submission.aiGradingStatus === 'completed');
+
+      if (hasValidSubjectiveScore) {
+        finalScore = Math.min(qMax, Math.max(0, qAns.score));
+      } else {
+        finalScore = undefined;
+      }
+    }
+
+    const isPending = finalScore === undefined && (
+      q.type === 'essay' ||
+      q.type === 'analisis_kasus' ||
+      q.type === 'scenario_assessment' ||
+      q.type === 'essay_subquestions' ||
+      (qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0)
+    );
 
     enrichedAnswers[q.id] = {
       ...qAns,
-      selectedOptions: Array.isArray(qAns.selectedOptions)
+      selectedOptions: (isComplexMCQ && Array.isArray(qAns.selectedOptions))
         ? qAns.selectedOptions
-        : (qAns.selectedOption ? [qAns.selectedOption] : undefined),
+        : (isComplexMCQ && qAns.selectedOption ? [qAns.selectedOption] : undefined),
       score: finalScore,
       maxScore: qMax,
-      isPendingEvaluation: finalScore === undefined && (q.type === 'essay' || q.type === 'analisis_kasus' || (qAns.multimodalEvidences && qAns.multimodalEvidences.length > 0))
+      isPendingEvaluation: isPending
     };
   });
 
@@ -2353,8 +2423,6 @@ export function evaluateSubmissionServerSide(submission: ExamSubmission, canonic
     const ans = enrichedAnswers[q.id];
     return isSubjective && typeof ans?.score !== 'number';
   });
-
-  const isTeacherValidated = submission.validationStatus === 'approved' || submission.validationStatus === 'revised' || Boolean(submission.validatedBy);
 
   submission.hasPendingComponents = Boolean(hasPendingComponents);
   submission.isScoreFinal = !hasPendingComponents && isTeacherValidated;
@@ -3388,35 +3456,40 @@ app.post("/api/ai/grade-exam-batch/:examId", async (req: Request, res: Response)
                 // Siswa melampirkan berkas bukti (audio/dokumen) tetapi belum/tidak terekstrak otomatis
                 // JANGAN vonis 0 mutlak! Berikan status review untuk guru
                 essayEvaluations[qId] = {
-                  score: 0,
+                  score: null,
                   maxScore: maxQuestionScore,
                   feedback: `Jawaban siswa disampaikan melalui lampiran berkas (${multimodalEvidences.map((e: any) => e.fileName).join(', ')}). Menunggu verifikasi audio/dokumen langsung oleh guru penguji.`,
                   keyConceptsMastered: [],
                   areasToImprove: ["Jawaban tersimpan dalam berkas audio/dokumen. Guru penguji dapat memeriksa lampiran dan menginputkan nilai akhir pada Exam Monitor."],
+                  isPendingEvaluation: true
                 };
                 (sub.answers as any)[qId] = {
                   ...(sub.answers as any)[qId],
-                  score: 0,
+                  score: undefined,
                   maxScore: maxQuestionScore,
+                  isPendingEvaluation: true,
                   teacherFeedback: `Menunggu verifikasi guru untuk berkas lampiran (${multimodalEvidences.map((e: any) => e.fileName).join(', ')}).`,
                   multimodalEvidences
                 };
                 sub.requiresTeacherReview = true;
+                sub.hasPendingComponents = true;
                 sub.status = 'perlu_pemeriksaan';
                 continue;
               } else {
-                // Siswa TIDAK MENJAWAB -> Nilai 0 Mutlak
+                // Siswa TIDAK MENJAWAB -> Nilai 0 Mutlak Sah
                 essayEvaluations[qId] = {
                   score: 0,
                   maxScore: maxQuestionScore,
                   feedback: "Siswa tidak memberikan jawaban teks maupun berkas bukti untuk soal ini.",
                   keyConceptsMastered: [],
                   areasToImprove: ["Soal belum dikerjakan. Siswa perlu memberikan jawaban atau melampirkan berkas bukti."],
+                  isPendingEvaluation: false
                 };
                 (sub.answers as any)[qId] = {
                   ...(sub.answers as any)[qId],
                   score: 0,
                   maxScore: maxQuestionScore,
+                  isPendingEvaluation: false,
                   teacherFeedback: "Siswa tidak memberikan jawaban.",
                 };
                 continue;
@@ -3472,6 +3545,7 @@ Output JSON:
 
             let evalJson: any = {};
             let usedProviderName = 'AI Provider';
+            let evalSuccess = true;
             try {
               const res = await callModalityAI(
                 studentModality,
@@ -3482,17 +3556,24 @@ Output JSON:
               usedProviderName = res.providerName;
             } catch (evalErr: any) {
               console.error(`[AI] Gagal menilai soal ${qId} via ${studentModality} API:`, evalErr.message);
-              evalJson = { score: 0, feedback: "Layanan evaluasi AI tidak dapat dihubungi. Nilai diset 0 untuk diperiksa manual oleh guru." };
+              evalSuccess = false;
+              evalJson = { score: undefined, feedback: "Layanan evaluasi AI tidak dapat dihubungi. Menunggu pemeriksaan langsung oleh guru." };
             }
 
-            const qScore = Math.min(Math.max(0, evalJson.score || 0), maxQuestionScore);
-            essayScore += qScore;
+            const qScore = (evalSuccess && typeof evalJson.score === 'number')
+              ? Math.min(Math.max(0, evalJson.score), maxQuestionScore)
+              : undefined;
+
+            if (qScore !== undefined) {
+              essayScore += qScore;
+            }
             essayEvaluations[qId] = {
-              score: qScore,
+              score: qScore !== undefined ? qScore : null,
               maxScore: maxQuestionScore,
               feedback: evalJson.feedback,
               keyConceptsMastered: evalJson.keyConceptsMastered || [],
               areasToImprove: evalJson.areasToImprove || [],
+              isPendingEvaluation: qScore === undefined
             };
 
             // Update skor pada answer
@@ -3500,6 +3581,7 @@ Output JSON:
               ...(sub.answers as any)[qId],
               score: qScore,
               maxScore: maxQuestionScore,
+              isPendingEvaluation: qScore === undefined,
               teacherFeedback: evalJson.feedback,
             };
           }
@@ -3518,6 +3600,8 @@ Output JSON:
             : `Skor Total Non-Tes Employability: ${empRes.totalRawScore}/90 (${empRes.finalPercentage}% - Kategori ${empRes.category}). ${empRes.interpretation}`;
         }
 
+        const hasPendingInSub = Object.values(sub.answers || {}).some((a: any) => a?.isPendingEvaluation || a?.score === undefined);
+
         // Update submission
         const updatedSub = {
           ...sub,
@@ -3526,9 +3610,11 @@ Output JSON:
           totalScore,
           technicalScore: isTechnicalExam ? totalScore : 0,
           employabilityScore: isEmployabilityExam ? totalScore : 0,
-          aiGradingStatus: 'completed' as const,
+          aiGradingStatus: hasPendingInSub ? ('failed' as const) : ('completed' as const),
           aiGradedAt: new Date().toISOString(),
-          status: 'dinilai' as const,
+          status: hasPendingInSub ? ('perlu_pemeriksaan' as const) : ('dinilai' as const),
+          hasPendingComponents: hasPendingInSub,
+          requiresTeacherReview: hasPendingInSub || sub.requiresTeacherReview,
           aiEvaluation: aiEvaluationText,
         };
 
@@ -3544,7 +3630,8 @@ Output JSON:
     }
 
     // Update exam AI grading status
-    db.exams = db.exams.map(e => e.id === examId ? { ...e, aiGradingStatus: 'completed' } : e);
+    const anyFailedInExam = db.submissions.filter(s => s.examId === examId).some(s => s.aiGradingStatus === 'failed' || s.hasPendingComponents);
+    db.exams = db.exams.map(e => e.id === examId ? { ...e, aiGradingStatus: anyFailedInExam ? 'failed' : 'completed' } : e);
     saveDb();
 
     res.json({
@@ -4316,12 +4403,14 @@ if (staticFrontendDir) {
   });
 }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Backend API Server running at http://localhost:${PORT}`);
-  console.log(`API Health: http://localhost:${PORT}/api/health`);
-  console.log(`Database initialized at backend/data/database.json`);
-  aiQueueManager.startWorker();
-});
+if (process.env.DISABLE_SERVER_LISTEN !== "true") {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Backend API Server running at http://localhost:${PORT}`);
+    console.log(`API Health: http://localhost:${PORT}/api/health`);
+    console.log(`Database initialized at backend/data/database.json`);
+    aiQueueManager.startWorker();
+  });
+}
 
 process.on("SIGINT", () => {
   aiQueueManager.stopWorker();

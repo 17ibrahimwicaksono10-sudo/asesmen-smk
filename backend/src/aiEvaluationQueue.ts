@@ -347,10 +347,22 @@ class AIEvaluationQueueManager {
         // 2. Pertahankan nilai jika sudah dinilai secara sah oleh guru atau siklus sebelumnya.
         // 3. Jika belum dinilai dan AI gagal/offline, tandai komponen sebagai pending/ungraded (score = undefined).
         let finalQScore: number | undefined = undefined;
-        if (typeof qAns.score === 'number') {
-          finalQScore = qAns.score; // Pertahankan skor sah yang sudah ada
+        // Hanya pertahankan skor numerik lama jika skor tersebut berasal dari validasi guru yang sah
+        const isTeacherScore = Boolean(
+          qAns.teacherValidated ||
+          sub.validationStatus === 'approved' ||
+          sub.validationStatus === 'revised' ||
+          sub.validatedBy ||
+          (qAns as any).teacherScore !== undefined
+        );
+
+        if (isTeacherScore && typeof qAns.score === 'number') {
+          finalQScore = qAns.score; // Pertahankan skor sah guru
         } else if (!isFailedOrOffline && typeof evalResult.total_score === 'number') {
           finalQScore = Math.min(qMax, Math.max(0, evalResult.total_score));
+        } else {
+          // AI gagal/offline dan belum ada nilai sah dari guru -> tandai undefined
+          finalQScore = undefined;
         }
 
         qAns.score = finalQScore;
@@ -361,7 +373,7 @@ class AIEvaluationQueueManager {
           evaluatedAt: evalResult.evaluated_at,
           modelUsed: evalResult.model_used,
           promptVersion: evalResult.prompt_version,
-          totalScoreGiven: finalQScore !== undefined ? finalQScore : 0,
+          totalScoreGiven: (finalQScore !== undefined ? finalQScore : (isFailedOrOffline ? undefined : 0)) as any,
           maxTotalScore: evalResult.maximum_score || qMax,
           scoresPerIndicator: isFailedOrOffline ? [] : (evalResult.rubric_scores || []).map(r => ({
             indicatorName: r.indicator,

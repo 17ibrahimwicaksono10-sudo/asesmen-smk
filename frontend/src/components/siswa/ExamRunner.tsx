@@ -521,7 +521,8 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           studentLetters.forEach((letter: string) => {
             if (correctLetters.includes(letter)) matchCount++;
           });
-          earnedScore = Math.min(qMax, matchCount);
+          const excessPicks = Math.max(0, studentLetters.length - correctLetters.length);
+          earnedScore = Math.min(qMax, Math.max(0, matchCount - excessPicks));
         } else if (q.statements && qAns.complexAnswers) {
           let correctCount = 0;
           q.statements.forEach(stmt => {
@@ -532,11 +533,31 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       } else if (q.type === 'matching' && q.matchingColumnA) {
         let correctCount = 0;
         q.matchingColumnA.forEach(m => {
-          const studentVal = (qAns.matchingAnswers && qAns.matchingAnswers[m.id] || '').trim();
-          const targetVal = (m.correctMatch || '').trim();
-          if (studentVal && (studentVal === targetVal || studentVal.slice(0, 1) === targetVal.slice(0, 1))) correctCount++;
+          const studentVal = (
+            (qAns.matchingAnswers && (qAns.matchingAnswers[m.id] ?? qAns.matchingAnswers[m.columnAText] ?? qAns.matchingAnswers[m.columnAText?.slice(0, 1)])) ??
+            (Array.isArray((qAns as any).matches) && (qAns as any).matches.find((p: any) => p.from === m.id || p.from === m.columnAText)?.to) ??
+            (Array.isArray((qAns as any).matchingPairs) && (qAns as any).matchingPairs.find((p: any) => p.from === m.id || p.from === m.columnAText || p.left === m.id || p.left === m.columnAText)?.to) ??
+            ''
+          ).toString().trim();
+          const targetVal = (m.correctMatch || '').toString().trim();
+          if (studentVal && targetVal) {
+            const sClean = studentVal.toLowerCase();
+            const tClean = targetVal.toLowerCase();
+            const sNum = studentVal.match(/^([0-9]+)/)?.[1] || studentVal.slice(0, 1);
+            const tNum = targetVal.match(/^([0-9]+)/)?.[1] || targetVal.slice(0, 1);
+            const sText = sClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+            const tText = tClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+
+            if (
+              sClean === tClean ||
+              (sNum && tNum && sNum === tNum) ||
+              (sText && tText && sText === tText)
+            ) {
+              correctCount++;
+            }
+          }
         });
-        earnedScore = correctCount; // 1 point per correct match (max 4)
+        earnedScore = Math.min(qMax, correctCount); // 1 point per correct match (max 4)
       } else if (q.type === 'short_answer') {
         const val = (qAns.shortAnswerText || '').toString().trim().replace(',', '.');
         const calc = (qAns.shortAnswerCalculation || '').toString().toLowerCase();
@@ -603,8 +624,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         }
       }
 
+      const isComplexMCQ = q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice';
       enrichedAnswers[q.id] = {
         ...qAns,
+        selectedOptions: isComplexMCQ ? qAns.selectedOptions : undefined,
         score: Math.min(qMax, Math.max(0, earnedScore)),
         maxScore: qMax
       };
