@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Exam, QuestionPackage, QuestionItem, StudentAnswer, ExamSubmission, MultimodalEvidence } from '../../types';
 import { calculateAssessmentScore, evaluateEssaySemantic, REVISED_QUESTIONS_24 } from '../../data/revisedQuestions';
 import { calculateEmployabilityScore, NON_TEST_QUESTIONS_18 } from '../../data/nonTestInstrument';
-import { Clock, CheckCircle2, AlertTriangle, ArrowLeft, ArrowRight, Send, Sparkles, ShieldAlert, BookOpen, Calculator, CheckSquare, Layers, Award, Info, Mic, RefreshCw } from 'lucide-react';
+import { Clock, CheckCircle2, AlertTriangle, AlertCircle, ArrowLeft, ArrowRight, Send, Sparkles, ShieldAlert, BookOpen, Calculator, CheckSquare, Layers, Award, Info, Mic, RefreshCw } from 'lucide-react';
 import { MultimodalUploader } from '../common/MultimodalUploader';
 
 interface ExamRunnerProps {
@@ -128,6 +128,35 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
     return () => clearTimeout(syncTimer);
   }, [answersState, currentQuestionIndex, exam.id, studentId, studentNis]);
+
+  // Muat draft dari server jika state lokal kosong (pemulihan crash/pindah perangkat)
+  useEffect(() => {
+    let isMounted = true;
+    const fetchServerDraft = async () => {
+      try {
+        const res = await fetch(`/api/exams/${exam.id}/draft`);
+        if (res.ok) {
+          const data = await res.json();
+          const draftAnswers = data.draft?.answers || data.draft?.draftData;
+          if (isMounted && draftAnswers && typeof draftAnswers === 'object' && Object.keys(draftAnswers).length > 0) {
+            setAnswersState(prev => {
+              if (Object.keys(prev).length === 0) {
+                return draftAnswers;
+              }
+              return prev;
+            });
+            if (typeof data.draft?.currentQuestionIndex === 'number' && data.draft.currentQuestionIndex > 0) {
+              setCurrentQuestionIndex(data.draft.currentQuestionIndex);
+            }
+          }
+        }
+      } catch (err) {}
+    };
+    if (Object.keys(answersState).length === 0) {
+      fetchServerDraft();
+    }
+    return () => { isMounted = false; };
+  }, [exam.id]);
 
   // Simpan sisa waktu setiap 5 detik agar akurat
   useEffect(() => {
@@ -484,7 +513,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
             earnedScore = (studentPick === correctPick || (studentPick.slice(0, 1) && studentPick.slice(0, 1) === correctPick.slice(0, 1))) ? 1 : 0;
           }
         }
-      } else if (q.type === 'complex_mcq') {
+      } else if (q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice') {
         if (Array.isArray(qAns.selectedOptions)) {
           const studentLetters = qAns.selectedOptions.map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
           const correctLetters = (q.correctAnswers || []).map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
@@ -492,7 +521,8 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           studentLetters.forEach((letter: string) => {
             if (correctLetters.includes(letter)) matchCount++;
           });
-          earnedScore = Math.min(qMax, matchCount);
+          const excessPicks = Math.max(0, studentLetters.length - correctLetters.length);
+          earnedScore = Math.min(qMax, Math.max(0, matchCount - excessPicks));
         } else if (q.statements && qAns.complexAnswers) {
           let correctCount = 0;
           q.statements.forEach(stmt => {
@@ -503,11 +533,31 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       } else if (q.type === 'matching' && q.matchingColumnA) {
         let correctCount = 0;
         q.matchingColumnA.forEach(m => {
-          const studentVal = (qAns.matchingAnswers && qAns.matchingAnswers[m.id] || '').trim();
-          const targetVal = (m.correctMatch || '').trim();
-          if (studentVal && (studentVal === targetVal || studentVal.slice(0, 1) === targetVal.slice(0, 1))) correctCount++;
+          const studentVal = (
+            (qAns.matchingAnswers && (qAns.matchingAnswers[m.id] ?? qAns.matchingAnswers[m.columnAText] ?? qAns.matchingAnswers[m.columnAText?.slice(0, 1)])) ??
+            (Array.isArray((qAns as any).matches) && (qAns as any).matches.find((p: any) => p.from === m.id || p.from === m.columnAText)?.to) ??
+            (Array.isArray((qAns as any).matchingPairs) && (qAns as any).matchingPairs.find((p: any) => p.from === m.id || p.from === m.columnAText || p.left === m.id || p.left === m.columnAText)?.to) ??
+            ''
+          ).toString().trim();
+          const targetVal = (m.correctMatch || '').toString().trim();
+          if (studentVal && targetVal) {
+            const sClean = studentVal.toLowerCase();
+            const tClean = targetVal.toLowerCase();
+            const sNum = studentVal.match(/^([0-9]+)/)?.[1] || studentVal.slice(0, 1);
+            const tNum = targetVal.match(/^([0-9]+)/)?.[1] || targetVal.slice(0, 1);
+            const sText = sClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+            const tText = tClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+
+            if (
+              sClean === tClean ||
+              (sNum && tNum && sNum === tNum) ||
+              (sText && tText && sText === tText)
+            ) {
+              correctCount++;
+            }
+          }
         });
-        earnedScore = correctCount; // 1 point per correct match (max 4)
+        earnedScore = Math.min(qMax, correctCount); // 1 point per correct match (max 4)
       } else if (q.type === 'short_answer') {
         const val = (qAns.shortAnswerText || '').toString().trim().replace(',', '.');
         const calc = (qAns.shortAnswerCalculation || '').toString().toLowerCase();
@@ -574,8 +624,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         }
       }
 
+      const isComplexMCQ = q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice';
       enrichedAnswers[q.id] = {
         ...qAns,
+        selectedOptions: isComplexMCQ ? qAns.selectedOptions : undefined,
         score: Math.min(qMax, Math.max(0, earnedScore)),
         maxScore: qMax
       };
@@ -829,7 +881,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
             <span className="text-xs text-amber-400 font-mono font-bold shrink-0">
               {currentQuestion.type === 'multiple_choice' && 'Pilihan Ganda'}
-              {currentQuestion.type === 'complex_mcq' && 'Pilihan Ganda Kompleks'}
+              {(currentQuestion.type === 'complex_mcq' || currentQuestion.type === 'pilihan_ganda_kompleks' || currentQuestion.type === 'complex_multiple_choice') && 'Pilihan Ganda Kompleks'}
               {currentQuestion.type === 'matching' && 'Menjodohkan'}
               {currentQuestion.type === 'short_answer' && 'Isian Singkat Berhitung'}
               {currentQuestion.type === 'essay' && 'Uraian Terbatas'}
@@ -915,7 +967,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           )}
 
           {/* 2. Complex MCQ (Google Form Checkbox Style - Pilihan Ganda Kompleks) */}
-          {currentQuestion.type === 'complex_mcq' && (() => {
+          {(currentQuestion.type === 'complex_mcq' || currentQuestion.type === 'pilihan_ganda_kompleks' || currentQuestion.type === 'complex_multiple_choice') && (() => {
             const complexOptions = (currentQuestion.options && currentQuestion.options.length > 0)
               ? currentQuestion.options
               : (activeQuestions.find(q => q.id === currentQuestion.id)?.options || []);

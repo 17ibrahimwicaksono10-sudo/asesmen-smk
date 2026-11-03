@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import http from 'http';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
@@ -8,10 +9,47 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const TEST_PORT = 5058;
+const MOCK_AI_PORT = 5097;
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 const SYNTHETIC_DIR = path.resolve(__dirname, '../data/synthetic_test_hotfix');
 const SYNTHETIC_DB_PATH = path.join(SYNTHETIC_DIR, 'database.json');
 const SERVER_DIST_PATH = path.resolve(__dirname, '../dist/server.js');
+
+// Mock AI Provider Controller
+let mockResponseHandler = (req, res, body) => {
+  res.writeHead(500, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: { message: 'DeepSeek mock server default offline' } }));
+};
+
+let mockAiServer = null;
+function startMockAiServer() {
+  return new Promise((resolve) => {
+    mockAiServer = http.createServer((req, res) => {
+      let data = '';
+      req.on('data', chunk => data += chunk);
+      req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(data); } catch {}
+        if (mockResponseHandler) {
+          mockResponseHandler(req, res, body);
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'No mock handler configured' } }));
+        }
+      });
+    });
+    mockAiServer.listen(MOCK_AI_PORT, '127.0.0.1', () => {
+      resolve();
+    });
+  });
+}
+
+function stopMockAiServer() {
+  if (mockAiServer) {
+    mockAiServer.close();
+    mockAiServer = null;
+  }
+}
 
 let passedCount = 0;
 let failedCount = 0;
@@ -247,6 +285,7 @@ async function startTestServer() {
         VOC_DATABASE_PATH: SYNTHETIC_DB_PATH,
         JWT_SECRET: 'super_secure_test_signing_secret_32bytes_long',
         AUTH_SECRET: 'super_secure_test_signing_secret_32bytes_long',
+        DEEPSEEK_BASE_URL: `http://127.0.0.1:${MOCK_AI_PORT}`,
         NODE_ENV: 'test'
       },
       stdio: ['pipe', 'pipe', 'pipe']
@@ -309,6 +348,7 @@ async function runAllTests() {
   console.log('======================================================================\n');
 
   setupSyntheticDatabase();
+  await startMockAiServer();
   await startTestServer();
 
   try {
@@ -547,8 +587,8 @@ async function runAllTests() {
       headers: { Authorization: `Bearer ${adminToken}` },
       body: {
         id: madiunExamId,
-        title: 'Ujian Kesiapan Kerja Madiun',
-        packageId: 'pkg-employability-18',
+        title: 'Ujian Kimia Analisis Madiun',
+        packageId: 'pkg-teknis-kimia-24',
         schoolId: newSchoolId,
         classId: newClassId,
         durationMinutes: 45,
@@ -626,7 +666,7 @@ async function runAllTests() {
     // ------------------------------------------------------------------
     console.log('\n--- 5. Uji Isolasi Multi-Tenant Submission Antar Sekolah ---');
 
-    // Siswa Madiun membuat submission untuk ujian Madiun
+    // Siswa Madiun membuat submission untuk ujian Madiun (memiliki butir esai riil)
     const madiunSubId = 'sub-madiun-live-01';
     const makeSubRes = await request('/api/submissions', {
       method: 'POST',
@@ -634,11 +674,12 @@ async function runAllTests() {
       body: {
         id: madiunSubId,
         examId: madiunExamId,
-        examTitle: 'Ujian Kesiapan Kerja Madiun',
+        examTitle: 'Ujian Kimia Analisis Madiun',
         answers: {
           'q-chem-1': {
             questionId: 'q-chem-1',
-            answerText: 'Analisis stoikiometri titrasi asam-basa menggunakan larutan standar NaOH.',
+            essayAnswer: 'Analisis stoikiometri titrasi asam-basa menggunakan larutan standar NaOH sekunder yang distandarisasi.',
+            answerText: 'Analisis stoikiometri titrasi asam-basa menggunakan larutan standar NaOH sekunder yang distandarisasi.',
             multimodalEvidences: []
           }
         },
@@ -646,7 +687,7 @@ async function runAllTests() {
         isTeacherValidated: false
       }
     });
-    recordTest(makeSubRes.status === 200, 'Siswa Madiun sukses membuat submission');
+    recordTest(makeSubRes.status === 200, 'Siswa Madiun sukses membuat submission dengan jawaban esai riil');
 
     // Guru Bandung mencoba mengakses submission siswa Madiun via GET /api/submissions/:id
     const bandungTeacherLogin = await request('/api/auth/login', {
@@ -677,7 +718,12 @@ async function runAllTests() {
     // ------------------------------------------------------------------
     console.log('\n--- 6. Uji Integritas AI Scoring & Larangan Skor Palsu ---');
 
-    // 6.1 Uji Endpoint Evaluasi Esai (DeepSeek Strict Pipeline)
+    // 6.1 Uji Endpoint Evaluasi Esai saat Provider Gagal (DeepSeek HTTP 500)
+    mockResponseHandler = (req, res) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'DeepSeek internal 500 error simulation' } }));
+    };
+
     const essayEvalRes = await request('/api/ai/evaluate-essay', {
       method: 'POST',
       headers: { Authorization: `Bearer ${teacherToken}` },
@@ -690,11 +736,19 @@ async function runAllTests() {
       }
     });
     recordTest(
-      essayEvalRes.status === 200 && Boolean(essayEvalRes.body.evaluation),
-      'Endpoint evaluasi esai menerima permintaan penilaian teks'
+      essayEvalRes.status === 200 &&
+      essayEvalRes.body.success === false &&
+      essayEvalRes.body.evaluation?.status === 'failed',
+      'Endpoint evaluate-essay mengembalikan success=false dan status=failed saat provider offline/error'
+    );
+    recordTest(
+      essayEvalRes.body.evaluation?.estimatedScore === undefined &&
+      Array.isArray(essayEvalRes.body.evaluation?.rubricScores) &&
+      essayEvalRes.body.evaluation.rubricScores.length === 0,
+      'Endpoint evaluate-essay TIDAK menghasilkan skor estimasi palsu atau rincian indikator palsu saat error'
     );
 
-    // 6.2 Uji Evaluasi Submission AI & Validasi Status (Pending -> Completed / Failed)
+    // 6.2 Uji Evaluasi Submission saat Provider Gagal (HTTP 500 / 401 / Timeout)
     const subAiRes = await request(`/api/ai/evaluate-submission/${madiunSubId}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${teacherToken}` },
@@ -705,35 +759,222 @@ async function runAllTests() {
       `Permintaan evaluasi AI submission diterima dengan baik (Status: ${subAiRes.status})`
     );
 
-    // 6.3 Verifikasi Status Valid AI & Larangan Skor Palsu
+    // Verifikasi Ketat Kegagalan AI: status failed, score undefined, status perlu_pemeriksaan
     const checkSub = await request(`/api/submissions/${madiunSubId}`, {
       headers: { Authorization: `Bearer ${teacherToken}` }
     });
     const subRecord = checkSub.body.submission;
-    const validAiStatuses = ['pending', 'processing', 'completed', 'failed'];
-    const currentStatus = subRecord?.aiGradingStatus;
     recordTest(
-      validAiStatuses.includes(currentStatus),
-      `Status AI submission berada dalam 4 status resmi valid ("${currentStatus}")`
+      subRecord?.aiGradingStatus === 'failed',
+      'Submission dengan kegagalan esai AI secara tegas berstatus aiGradingStatus="failed"'
+    );
+    recordTest(
+      subRecord?.requiresTeacherReview === true && subRecord?.isScoreFinal === false,
+      'Kegagalan AI ditandai requiresTeacherReview=true dan isScoreFinal=false'
+    );
+    recordTest(
+      subRecord?.status === 'perlu_pemeriksaan' && subRecord?.hasPendingComponents === true,
+      'Submission dengan kegagalan AI otomatis berstatus perlu_pemeriksaan dan hasPendingComponents=true'
+    );
+    recordTest(
+      subRecord?.answers?.['q-chem-1']?.score === undefined && subRecord?.answers?.['q-chem-1']?.isPendingEvaluation === true,
+      'Kegagalan AI TIDAK menghasilkan nilai angka buatan/palsu (score: undefined, isPendingEvaluation: true)'
     );
 
-    // Verifikasi bahwa kegagalan provider (kunci belum ada/dummy) tidak menghasilkan skor palsu
-    if (currentStatus === 'failed') {
-      recordTest(
-        subRecord.requiresTeacherReview === true && subRecord.isScoreFinal === false,
-        'Kegagalan DeepSeek/AI ditandai requiresTeacherReview=true dan isScoreFinal=false'
-      );
-      recordTest(
-        subRecord.status === 'perlu_pemeriksaan',
-        'Submission dengan kegagalan AI otomatis berstatus perlu_pemeriksaan'
-      );
-      recordTest(
-        subRecord.answers?.['q-chem-1']?.score === undefined,
-        'Kegagalan AI TIDAK menghasilkan nilai angka buatan/palsu pada jawaban esai'
-      );
-    }
+    // 6.3 Uji Kegagalan Sebagian (Partial Failure Multi-Komponen: 1 Sukses, 1 Gagal)
+    console.log('\n--- 6.3 Uji Kegagalan Sebagian pada Submission Multi-Komponen Esai ---');
+    const multiExamId = 'ex-multi-essay-madiun';
+    await request('/api/exams', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+      body: {
+        id: multiExamId,
+        title: 'Ujian Komprehensif Analisis & K3 Madiun',
+        packageId: 'pkg-teknis-kimia-24',
+        schoolId: newSchoolId,
+        classId: newClassId,
+        questionSnapshot: [
+          {
+            id: 'q-multi-1',
+            type: 'essay',
+            questionText: 'Soal 1 Teori Reaksi Netralisasi Asam Basa',
+            points: 10,
+            maxScore: 10,
+            rubricGuide: 'Rubrik konsep reaksi'
+          },
+          {
+            id: 'q-multi-2',
+            type: 'essay',
+            questionText: 'Soal 2 Prosedur K3 dan Penanganan Limbah',
+            points: 10,
+            maxScore: 10,
+            rubricGuide: 'Rubrik kepatuhan K3'
+          }
+        ],
+        durationMinutes: 60,
+        passingGrade: 75,
+        status: 'active'
+      }
+    });
 
-    // 6.4 Validasi Skor oleh Guru (Manual Override & Approval)
+    const multiSubId = 'sub-multi-partial-01';
+    await request('/api/submissions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${reconciledToken}` },
+      body: {
+        id: multiSubId,
+        examId: multiExamId,
+        examTitle: 'Ujian Komprehensif Analisis & K3 Madiun',
+        answers: {
+          'q-multi-1': {
+            questionId: 'q-multi-1',
+            essayAnswer: 'Reaksi netralisasi menghasilkan garam dan air dengan pelepasan kalor netralisasi.',
+            multimodalEvidences: []
+          },
+          'q-multi-2': {
+            questionId: 'q-multi-2',
+            essayAnswer: 'Limbah sisa titrasi dinetralkan dalam bak penampung sebelum dibuang ke saluran IPAL.',
+            multimodalEvidences: []
+          }
+        },
+        status: 'submitted',
+        isTeacherValidated: false
+      }
+    });
+
+    // Mock: Soal 1 Sukses (HTTP 200 skor 8), Soal 2 Gagal (HTTP 500)
+    mockResponseHandler = (req, res, body) => {
+      const userMsg = body.messages?.find(m => m.role === 'user')?.content || '';
+      if (userMsg.includes('Soal 1')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  total_score: 8,
+                  scoring_reason: 'Konsep netralisasi dijelaskan dengan tepat',
+                  feedback: 'Bagus, penjelasan reaksi eksoterm tepat',
+                  rubric_scores: [{ indicator: 'Konsep', score: 8, maxScore: 10, feedback: 'Tepat' }],
+                  requires_teacher_review: false
+                })
+              }
+            }
+          ]
+        }));
+      } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'DeepSeek downstream error pada Soal 2' } }));
+      }
+    };
+
+    await request(`/api/ai/evaluate-submission/${multiSubId}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+      body: { forceSync: true }
+    });
+
+    const checkMultiSub = await request(`/api/submissions/${multiSubId}`, {
+      headers: { Authorization: `Bearer ${teacherToken}` }
+    });
+    const multiRecord = checkMultiSub.body.submission;
+    recordTest(
+      multiRecord?.aiGradingStatus === 'failed',
+      'Submission dengan kegagalan sebagian DILARANG ditandai completed (aiGradingStatus="failed")'
+    );
+    recordTest(
+      multiRecord?.hasPendingComponents === true && multiRecord?.isScoreFinal === false,
+      'Submission kegagalan sebagian mempertahankan hasPendingComponents=true dan isScoreFinal=false'
+    );
+    recordTest(
+      multiRecord?.answers?.['q-multi-1']?.score === 8 && multiRecord?.answers?.['q-multi-1']?.isPendingEvaluation === false,
+      'Komponen yang berhasil dinilai mempertahankan skor sah (Soal 1: skor 8, isPendingEvaluation=false)'
+    );
+    recordTest(
+      multiRecord?.answers?.['q-multi-2']?.score === undefined && multiRecord?.answers?.['q-multi-2']?.isPendingEvaluation === true,
+      'Komponen yang gagal TIDAK menerima skor palsu (Soal 2: score undefined, isPendingEvaluation=true)'
+    );
+
+    // 6.4 Uji Keberhasilan Penuh Provider (Seluruh Komponen Berhasil Dinilai)
+    console.log('\n--- 6.4 Uji Keberhasilan Provider Penuh (Seluruh Komponen Sukses) ---');
+    mockResponseHandler = (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                total_score: 18,
+                scoring_reason: 'Semua indikator rubrik dipenuhi secara komprehensif',
+                feedback: 'Analisis stoikiometri dan buret sangat tepat',
+                rubric_scores: [
+                  { indicator: 'Stoikiometri', score: 9, maxScore: 10, feedback: 'Sangat baik' },
+                  { indicator: 'K3 & Buret', score: 9, maxScore: 10, feedback: 'Sangat teliti' }
+                ],
+                requires_teacher_review: false
+              })
+            }
+          }
+        ]
+      }));
+    };
+
+    const successExamId = 'ex-madiun-success-01';
+    await request('/api/exams', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+      body: {
+        id: successExamId,
+        title: 'Ujian Kimia Analisis Sukses Madiun',
+        packageId: 'pkg-teknis-kimia-24',
+        schoolId: newSchoolId,
+        classId: newClassId,
+        durationMinutes: 45,
+        passingGrade: 75,
+        status: 'active'
+      }
+    });
+
+    const successSubId = 'sub-madiun-success-01';
+    await request('/api/submissions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${reconciledToken}` },
+      body: {
+        id: successSubId,
+        examId: successExamId,
+        examTitle: 'Ujian Kimia Analisis Sukses Madiun',
+        answers: {
+          'q-chem-1': {
+            questionId: 'q-chem-1',
+            essayAnswer: 'Standarisasi larutan NaOH menggunakan asam oksalat baku primer dengan indikator PP.',
+            multimodalEvidences: []
+          }
+        },
+        status: 'submitted',
+        isTeacherValidated: false
+      }
+    });
+
+    await request(`/api/ai/evaluate-submission/${successSubId}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+      body: { forceSync: true }
+    });
+
+    const checkSuccessSub = await request(`/api/submissions/${successSubId}`, {
+      headers: { Authorization: `Bearer ${teacherToken}` }
+    });
+    const successRecord = checkSuccessSub.body.submission;
+    recordTest(
+      successRecord?.aiGradingStatus === 'completed',
+      'Status aiGradingStatus="completed" HANYA diberikan jika seluruh komponen esai berhasil dinilai sah'
+    );
+    recordTest(
+      successRecord?.answers?.['q-chem-1']?.score === 18 && successRecord?.hasPendingComponents === false,
+      'Skor esai sah tercatat persisten (skor: 18) dan hasPendingComponents=false'
+    );
+
+    // 6.5 Validasi Skor oleh Guru (Manual Override & Approval)
     const updateScoreRes = await request(`/api/submissions/${madiunSubId}`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${teacherToken}` },
@@ -755,9 +996,98 @@ async function runAllTests() {
     );
 
     // ------------------------------------------------------------------
-    // TAHAP 7: PERLINDUNGAN SUBMISSION HISTORIS (24 DATA HISTORIS)
+    // TAHAP 7: UJI OTORISASI & PEMULIHAN DRAFT AUTOSAVE SERVER
     // ------------------------------------------------------------------
-    console.log('\n--- 7. Uji Perlindungan Data Submission Historis (24 Submissions) ---');
+    console.log('\n--- 7. Uji Otorisasi & Pemulihan Endpoint Autosave Draft ---');
+
+    const draftExamId = 'ex-madiun-draft-01';
+    await request('/api/exams', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+      body: {
+        id: draftExamId,
+        title: 'Ujian Autosave Draft Madiun',
+        packageId: 'pkg-teknis-kimia-24',
+        schoolId: newSchoolId,
+        classId: newClassId,
+        durationMinutes: 45,
+        passingGrade: 75,
+        status: 'active'
+      }
+    });
+
+    // 7.1 Tanpa Login: Ditolak HTTP 401
+    const unauthPostDraft = await request(`/api/exams/${draftExamId}/draft`, {
+      method: 'POST',
+      body: { answers: { 'q-01': { selectedOption: 'A' } } }
+    });
+    recordTest(unauthPostDraft.status === 401, 'POST /api/exams/:id/draft tanpa login ditolak HTTP 401');
+
+    const unauthGetDraft = await request(`/api/exams/${draftExamId}/draft`);
+    recordTest(unauthGetDraft.status === 401, 'GET /api/exams/:id/draft tanpa login ditolak HTTP 401');
+
+    // 7.2 Isolasi Antar-Siswa / Antar-Sekolah: Siswa Cirebon akses Ujian Bandung ditolak HTTP 403
+    const stdCirebonLogin = await request('/api/auth/login', {
+      method: 'POST',
+      body: { email: 'ahmad.f@example.com', password: 'password123' }
+    });
+    const stdCirebonToken = stdCirebonLogin.body.token;
+
+    const crossSchoolDraft = await request('/api/exams/ex-ki-02/draft', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${stdCirebonToken}` },
+      body: { answers: { 'q-01': { selectedOption: 'B' } } }
+    });
+    recordTest(
+      crossSchoolDraft.status === 403,
+      `Siswa Cirebon DITOLAK (HTTP 403) saat menyimpan draf ke ujian sekolah Bandung (Status: ${crossSchoolDraft.status})`
+    );
+
+    // 7.3 Guru Sekolah Lain DITOLAK (HTTP 403) saat mengintip draf siswa sekolah binaan lain
+    const teacherCrossDraft = await request(`/api/exams/${draftExamId}/draft?studentId=usr-std-01`, {
+      headers: { Authorization: `Bearer ${bandungTeacherToken}` }
+    });
+    recordTest(
+      teacherCrossDraft.status === 403,
+      `Guru Bandung DITOLAK (HTTP 403) saat mengakses draf siswa sekolah lain (Status: ${teacherCrossDraft.status})`
+    );
+
+    // 7.4 Siswa Madiun Menyimpan & Memulihkan Draf Pilihan Ganda Kompleks (2 Opsi Terpilih)
+    const complexDraftAnswers = {
+      'q-complex-1': {
+        questionId: 'q-complex-1',
+        selectedOptions: [
+          'A. Memakai kacamata pelindung (goggles)',
+          'B. Menyalakan blower exhaust fan laboratorium'
+        ]
+      }
+    };
+    const saveDraftRes = await request(`/api/exams/${draftExamId}/draft`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${reconciledToken}` },
+      body: {
+        answers: complexDraftAnswers,
+        currentQuestionIndex: 2
+      }
+    });
+    recordTest(saveDraftRes.status === 200 && saveDraftRes.body.success, 'Siswa Madiun sukses autosave draf Pilihan Ganda Kompleks ke server');
+
+    const getDraftRes = await request(`/api/exams/${draftExamId}/draft`, {
+      headers: { Authorization: `Bearer ${reconciledToken}` }
+    });
+    const restoredOptions = getDraftRes.body?.draft?.answers?.['q-complex-1']?.selectedOptions;
+    recordTest(
+      Array.isArray(restoredOptions) &&
+      restoredOptions.length === 2 &&
+      restoredOptions.includes('A. Memakai kacamata pelindung (goggles)') &&
+      restoredOptions.includes('B. Menyalakan blower exhaust fan laboratorium'),
+      'Kedua opsi Pilihan Ganda Kompleks pulih 100% utuh dari server draft autosave'
+    );
+
+    // ------------------------------------------------------------------
+    // TAHAP 8: PERLINDUNGAN SUBMISSION HISTORIS (24 DATA HISTORIS)
+    // ------------------------------------------------------------------
+    console.log('\n--- 8. Uji Perlindungan Data Submission Historis (24 Submissions) ---');
 
     const finalBootstrap = await request('/api/bootstrap', {
       headers: { Authorization: `Bearer ${adminToken}` }
@@ -780,6 +1110,7 @@ async function runAllTests() {
 
   } finally {
     stopTestServer();
+    stopMockAiServer();
   }
 
   // ------------------------------------------------------------------
@@ -796,6 +1127,7 @@ async function runAllTests() {
 
 runAllTests().catch(err => {
   stopTestServer();
+  stopMockAiServer();
   console.error('\n❌ Pengujian Terhenti dengan Galat:', err);
   process.exit(1);
 });

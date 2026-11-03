@@ -691,7 +691,35 @@ export const MultimodalReviewModal: React.FC<MultimodalReviewModalProps> = ({
                     </div>
                   )}
 
-                  {!selectedAnswer.selectedOption && !selectedAnswer.essayAnswer && answerEvidences.length === 0 && (
+                  {(questionObj?.type === 'complex_mcq' || questionObj?.type === 'pilihan_ganda_kompleks' || questionObj?.type === 'complex_multiple_choice') && Array.isArray(selectedAnswer.selectedOptions) && selectedAnswer.selectedOptions.length > 0 && (
+                    <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-700/80 mt-2 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-blue-400"></span>
+                          Pilihan Ganda Kompleks Siswa (Checkbox):
+                        </span>
+                        <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                          {selectedAnswer.selectedOptions.length} Opsi Terpilih • Skor: {selectedAnswer.score ?? 0} / {selectedAnswer.maxScore || (questionObj as any)?.points || (questionObj as any)?.maxScore || 5}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {selectedAnswer.selectedOptions.map((opt: string, idx: number) => (
+                          <span key={idx} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-blue-950/70 border border-blue-500/40 text-blue-200">
+                            <span className="w-2 h-2 rounded-full bg-blue-400 shrink-0"></span>
+                            {opt}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!selectedAnswer.selectedOption &&
+                    (!Array.isArray(selectedAnswer.selectedOptions) || selectedAnswer.selectedOptions.length === 0) &&
+                    !selectedAnswer.essayAnswer &&
+                    (!selectedAnswer.complexAnswers || Object.keys(selectedAnswer.complexAnswers).length === 0) &&
+                    (!selectedAnswer.matchingAnswers || Object.keys(selectedAnswer.matchingAnswers).length === 0) &&
+                    !selectedAnswer.shortAnswerText &&
+                    answerEvidences.length === 0 && (
                     <div className="bg-rose-950/40 border border-rose-800/60 rounded-lg p-3 mt-2 flex items-center justify-between text-xs text-rose-300">
                       <div className="flex items-center gap-2">
                         <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />

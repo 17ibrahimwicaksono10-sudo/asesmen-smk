@@ -952,7 +952,11 @@ export function calculateAssessmentScore(answers: Record<string, any>, questions
               matchCount++;
             }
           });
-          qScore = Math.min(itemMax, matchCount);
+          const targetCount = correctLetters.length;
+          const pointsPerKey = targetCount > 0 ? itemMax / targetCount : 0;
+          const excessPicks = Math.max(0, studentLetters.length - correctLetters.length);
+          const netCorrect = Math.max(0, matchCount - excessPicks);
+          qScore = Math.min(itemMax, Math.round(netCorrect * pointsPerKey * 10) / 10);
         } else if (q.statements && ans.complexAnswers) {
           let correctCount = 0;
           q.statements.forEach(stmt => {
@@ -967,13 +971,33 @@ export function calculateAssessmentScore(answers: Record<string, any>, questions
       else if (q.type === 'matching' && q.matchingColumnA) {
         let correctCount = 0;
         q.matchingColumnA.forEach(item => {
-          const studentVal = (ans.matchingAnswers && ans.matchingAnswers[item.id] || '').trim();
-          const targetVal = (item.correctMatch || '').trim();
-          if (studentVal && (studentVal === targetVal || studentVal.slice(0, 1) === targetVal.slice(0, 1))) {
-            correctCount++;
+          const studentVal = (
+            (ans.matchingAnswers && (ans.matchingAnswers[item.id] ?? ans.matchingAnswers[item.columnAText] ?? ans.matchingAnswers[item.columnAText?.slice(0, 1)])) ??
+            (Array.isArray((ans as any).matches) && (ans as any).matches.find((p: any) => p.from === item.id || p.from === item.columnAText)?.to) ??
+            (Array.isArray((ans as any).matchingPairs) && (ans as any).matchingPairs.find((p: any) => p.from === item.id || p.from === item.columnAText || p.left === item.id || p.left === item.columnAText)?.to) ??
+            ''
+          ).toString().trim();
+          const targetVal = (item.correctMatch || '').toString().trim();
+          if (studentVal && targetVal) {
+            const sClean = studentVal.toLowerCase();
+            const tClean = targetVal.toLowerCase();
+            const sNum = studentVal.match(/^([0-9]+)/)?.[1] || studentVal.slice(0, 1);
+            const tNum = targetVal.match(/^([0-9]+)/)?.[1] || targetVal.slice(0, 1);
+            const sText = sClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+            const tText = tClean.replace(/^[0-9]+[.):\s]+/, '').trim();
+
+            if (
+              sClean === tClean ||
+              (sNum && tNum && sNum === tNum) ||
+              (sText && tText && sText === tText)
+            ) {
+              correctCount++;
+            }
           }
         });
-        qScore = correctCount; // 0, 1, 2, 3, or 4
+        const totalItems = q.matchingColumnA.length;
+        const pointsPerItem = totalItems > 0 ? itemMax / totalItems : 1;
+        qScore = Math.min(itemMax, Math.round(correctCount * pointsPerItem * 10) / 10);
       }
       // 4. Essay (Soal 4, 8, 10, 11, 12, 14, 16, 20, 24)
       else if (q.type === 'essay' || q.type === 'short_answer') {

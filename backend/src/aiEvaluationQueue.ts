@@ -283,13 +283,23 @@ class AIEvaluationQueueManager {
         if (audioEv) {
           const audioData = audioEv.fileData || audioEv.storagePath || audioEv.storageUrl;
           const mime = audioEv.mimeType || 'audio/webm';
-          evalResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, audioData || '', mime);
+          const existingTranscript = (audioEv.extractedText && !audioEv.extractedText.startsWith('['))
+            ? audioEv.extractedText
+            : ((qAns.audioTranscript && !qAns.audioTranscript.startsWith('[')) ? qAns.audioTranscript : undefined);
+
+          evalResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, audioData || '', mime, existingTranscript);
           if (evalResult.transcription_or_extraction && (!audioEv.extractedText || audioEv.extractedText.startsWith('['))) {
             audioEv.extractedText = evalResult.transcription_or_extraction;
             audioEv.extractionStatus = 'completed';
           }
+          if (evalResult.transcription_or_extraction) {
+            qAns.audioTranscript = evalResult.transcription_or_extraction;
+            if (!qAns.essayAnswer) {
+              qAns.essayAnswer = evalResult.transcription_or_extraction;
+            }
+          }
         }
-        // 2. JALUR FOTO TULISAN TANGAN: Gemini Vision Multimodal Murni
+        // 2. JALUR FOTO TULISAN TANGAN: Gemini Vision Multimodal Murni (Penilaian Langsung)
         else if (imageEv) {
           const imgData = imageEv.fileData || imageEv.storagePath || imageEv.storageUrl;
           const mime = imageEv.mimeType || 'image/jpeg';
@@ -298,10 +308,16 @@ class AIEvaluationQueueManager {
             imageEv.extractedText = evalResult.transcription_or_extraction;
             imageEv.extractionStatus = 'completed';
           }
+          if (evalResult.transcription_or_extraction && !qAns.essayAnswer) {
+            qAns.essayAnswer = evalResult.transcription_or_extraction;
+          }
         }
         // 3. JALUR JAWABAN KETIKAN SISWA: DeepSeek API Murni
         else {
-          let typedText = (qAns.essayAnswer || '').trim();
+          let typedText = (qAns.essayAnswer || (qAns as any).answerText || (qAns as any).textAnswer || '').trim();
+          if (!qAns.essayAnswer && typedText) {
+            qAns.essayAnswer = typedText;
+          }
           if (qAns.subQuestionAnswers && Object.keys(qAns.subQuestionAnswers).length > 0) {
             const subText = Object.entries(qAns.subQuestionAnswers).map(([k, v]) => `[Sub ${k}]: ${v}`).join('\n');
             typedText += (typedText ? '\n' : '') + subText;
@@ -331,10 +347,22 @@ class AIEvaluationQueueManager {
         // 2. Pertahankan nilai jika sudah dinilai secara sah oleh guru atau siklus sebelumnya.
         // 3. Jika belum dinilai dan AI gagal/offline, tandai komponen sebagai pending/ungraded (score = undefined).
         let finalQScore: number | undefined = undefined;
-        if (typeof qAns.score === 'number') {
-          finalQScore = qAns.score; // Pertahankan skor sah yang sudah ada
+        // Hanya pertahankan skor numerik lama jika skor tersebut berasal dari validasi guru yang sah
+        const isTeacherScore = Boolean(
+          qAns.teacherValidated ||
+          sub.validationStatus === 'approved' ||
+          sub.validationStatus === 'revised' ||
+          sub.validatedBy ||
+          (qAns as any).teacherScore !== undefined
+        );
+
+        if (isTeacherScore && typeof qAns.score === 'number') {
+          finalQScore = qAns.score; // Pertahankan skor sah guru
         } else if (!isFailedOrOffline && typeof evalResult.total_score === 'number') {
           finalQScore = Math.min(qMax, Math.max(0, evalResult.total_score));
+        } else {
+          // AI gagal/offline dan belum ada nilai sah dari guru -> tandai undefined
+          finalQScore = undefined;
         }
 
         qAns.score = finalQScore;
@@ -345,9 +373,9 @@ class AIEvaluationQueueManager {
           evaluatedAt: evalResult.evaluated_at,
           modelUsed: evalResult.model_used,
           promptVersion: evalResult.prompt_version,
-          totalScoreGiven: finalQScore !== undefined ? finalQScore : 0,
+          totalScoreGiven: (finalQScore !== undefined ? finalQScore : (isFailedOrOffline ? undefined : 0)) as any,
           maxTotalScore: evalResult.maximum_score || qMax,
-          scoresPerIndicator: (evalResult.rubric_scores || []).map(r => ({
+          scoresPerIndicator: isFailedOrOffline ? [] : (evalResult.rubric_scores || []).map(r => ({
             indicatorName: r.indicator,
             maxPoints: r.maxScore,
             scoreGiven: r.score,

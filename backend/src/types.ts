@@ -56,6 +56,8 @@ export type QuestionCategory = 'teknis_kimia' | 'employability';
 export type QuestionType =
   | 'multiple_choice'
   | 'complex_mcq'
+  | 'pilihan_ganda_kompleks'
+  | 'complex_multiple_choice'
   | 'matching'
   | 'short_answer'
   | 'essay'
@@ -292,6 +294,7 @@ export interface StudentAnswer {
   shortAnswerText?: string;
   shortAnswerCalculation?: string;
   essayAnswer?: string;
+  audioTranscript?: string;
   subQuestionAnswers?: Record<string, string>;
   multimodalEvidences?: MultimodalEvidence[];
   aiRubricScoring?: AIRubricScoreResult;
