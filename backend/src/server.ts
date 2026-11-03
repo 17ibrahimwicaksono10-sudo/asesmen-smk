@@ -2758,18 +2758,19 @@ app.post("/api/ai/evaluate-essay", async (req: Request, res: Response) => {
 
     // ATURAN 1: Teks ketikan siswa dievaluasi STRICTLY oleh DeepSeek (Gemini dilarang)
     const standardResult = await evaluateTypedEssayWithDeepSeek(context, String(studentAnswer));
+    const isSuccess = standardResult.assessment_status === 'completed';
 
     res.json({
-      success: true,
+      success: isSuccess,
       evaluation: {
         estimatedScore: standardResult.total_score,
         constructiveFeedback: standardResult.feedback,
         scoringReason: standardResult.scoring_reason,
-        rubricScores: standardResult.rubric_scores,
+        rubricScores: isSuccess ? standardResult.rubric_scores : [],
         status: standardResult.assessment_status,
         requiresTeacherReview: standardResult.requires_teacher_review,
-        keyConceptsMastered: standardResult.rubric_scores.filter(r => r.score > 0).map(r => r.indicator),
-        areasToImprove: standardResult.rubric_scores.filter(r => r.score < r.maxScore).map(r => r.indicator),
+        keyConceptsMastered: isSuccess ? standardResult.rubric_scores.filter(r => r.score > 0).map(r => r.indicator) : [],
+        areasToImprove: isSuccess ? standardResult.rubric_scores.filter(r => r.score < r.maxScore).map(r => r.indicator) : [],
       },
       standardResult,
       provider: standardResult.model_used,

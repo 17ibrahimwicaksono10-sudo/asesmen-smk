@@ -186,14 +186,7 @@ export async function evaluateTypedEssayWithDeepSeek(
     input_type: 'typed_text',
     model_used: `DeepSeek (${model})`,
     transcription_or_extraction: studentText || '',
-    rubric_scores: (context.rubricComponents && context.rubricComponents.length > 0)
-      ? context.rubricComponents.map(r => ({
-          indicator: r.name || (r as any).indicator || 'Kriteria Penilaian',
-          score: 0,
-          maxScore: r.maxPoints || (r as any).maxScore || Math.round((context.maxScore || 10) / context.rubricComponents!.length),
-          feedback: 'Menunggu validasi guru'
-        }))
-      : [],
+    rubric_scores: [],
     total_score: undefined,
     maximum_score: context.maxScore || 10,
     feedback: '',

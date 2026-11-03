@@ -314,7 +314,10 @@ class AIEvaluationQueueManager {
         }
         // 3. JALUR JAWABAN KETIKAN SISWA: DeepSeek API Murni
         else {
-          let typedText = (qAns.essayAnswer || '').trim();
+          let typedText = (qAns.essayAnswer || (qAns as any).answerText || (qAns as any).textAnswer || '').trim();
+          if (!qAns.essayAnswer && typedText) {
+            qAns.essayAnswer = typedText;
+          }
           if (qAns.subQuestionAnswers && Object.keys(qAns.subQuestionAnswers).length > 0) {
             const subText = Object.entries(qAns.subQuestionAnswers).map(([k, v]) => `[Sub ${k}]: ${v}`).join('\n');
             typedText += (typedText ? '\n' : '') + subText;
@@ -360,7 +363,7 @@ class AIEvaluationQueueManager {
           promptVersion: evalResult.prompt_version,
           totalScoreGiven: finalQScore !== undefined ? finalQScore : 0,
           maxTotalScore: evalResult.maximum_score || qMax,
-          scoresPerIndicator: (evalResult.rubric_scores || []).map(r => ({
+          scoresPerIndicator: isFailedOrOffline ? [] : (evalResult.rubric_scores || []).map(r => ({
             indicatorName: r.indicator,
             maxPoints: r.maxScore,
             scoreGiven: r.score,
