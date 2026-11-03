@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, School, ClassRoom, Teacher, QuestionPackage, Exam, ExamSubmission, ArchivedItem, SystemSettings, StudentReadinessProfileData, PortfolioItem } from './types';
+import { User, School, ClassRoom, Teacher, QuestionPackage, QuestionItem, Exam, ExamSubmission, ArchivedItem, SystemSettings, StudentReadinessProfileData, PortfolioItem } from './types';
 import {
   PRESET_USERS,
   INITIAL_SCHOOLS,

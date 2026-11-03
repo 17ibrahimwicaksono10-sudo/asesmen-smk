@@ -694,6 +694,7 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                     const hasAnswer = Boolean(
                       (ans.essayAnswer && ans.essayAnswer.trim()) ||
                       (ans.selectedOption) ||
+                      (Array.isArray(ans.selectedOptions) && ans.selectedOptions.length > 0) ||
                       (ans.complexAnswers && Object.keys(ans.complexAnswers).length > 0) ||
                       (ans.matchingAnswers && Object.keys(ans.matchingAnswers).length > 0) ||
                       (ans.shortAnswerText && ans.shortAnswerText.trim()) ||
@@ -776,11 +777,21 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                               const optClean = (typeof opt === 'string' ? opt : (opt ? String((opt as any).text || (opt as any).label || opt) : '')).trim().toUpperCase();
                               const correctClean = (typeof qItem.correctAnswer === 'string' ? qItem.correctAnswer : String(qItem.correctAnswer || '')).trim().toUpperCase();
 
-                              const isStudentPick = studentClean === optClean ||
-                                (studentClean.length === 1 && (studentClean === letter || optClean.startsWith(studentClean))) ||
-                                (optClean.startsWith(studentClean) && studentClean.length > 0);
+                              const isStudentPick = Array.isArray(ans.selectedOptions) && ans.selectedOptions.length > 0
+                                ? ans.selectedOptions.some((sOpt: string) => {
+                                    const sClean = (sOpt || '').trim().toUpperCase();
+                                    return sClean === optClean || sClean === letter || optClean.startsWith(sClean) || (sClean.length > 1 && optClean.includes(sClean));
+                                  })
+                                : (studentClean === optClean ||
+                                    (studentClean.length === 1 && (studentClean === letter || optClean.startsWith(studentClean))) ||
+                                    (optClean.startsWith(studentClean) && studentClean.length > 0));
 
-                              const isCorrectAnswer = (qItem as any).scoringMap
+                              const isCorrectAnswer = Array.isArray(qItem.correctAnswers) && qItem.correctAnswers.length > 0
+                                ? qItem.correctAnswers.some((cAns: string) => {
+                                    const cClean = (cAns || '').trim().toUpperCase();
+                                    return cClean === optClean || cClean === letter || optClean.startsWith(cClean) || (cClean.length > 1 && optClean.includes(cClean));
+                                  })
+                                : (qItem as any).scoringMap
                                 ? (qItem.correctAnswer ? optClean.startsWith(correctClean.slice(0, 1)) : score === 5)
                                 : (correctClean.length > 0 && (optClean === correctClean || optClean.startsWith(correctClean.slice(0, 1))));
 
@@ -891,6 +902,28 @@ export const ExamMonitor: React.FC<ExamMonitorProps> = ({
                                   Skor Butir: {ans.score ?? (qItem as any).scoringMap[qItem.options?.indexOf(ans.selectedOption) >= 0 ? String.fromCharCode(65 + qItem.options.indexOf(ans.selectedOption)) : 'A'] ?? 1} / 5
                                 </div>
                               )}
+                            </div>
+                          )}
+
+                          {Array.isArray(ans.selectedOptions) && ans.selectedOptions.length > 0 && (
+                            <div className="p-2.5 rounded bg-slate-900 border border-slate-800 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <strong className="text-slate-300 text-xs flex items-center gap-1.5">
+                                  <span className="w-2 h-2 rounded-full bg-blue-400"></span>
+                                  Pilihan Siswa (Pilihan Ganda Kompleks):
+                                </strong>
+                                <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                                  {ans.selectedOptions.length} Opsi Terpilih • Skor: {ans.score ?? 0} / {maxQuestionPoints}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                {ans.selectedOptions.map((optVal: string, oIdx: number) => (
+                                  <span key={oIdx} className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/70 border border-blue-500/40 text-blue-200 text-xs font-medium">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                                    {optVal}
+                                  </span>
+                                ))}
+                              </div>
                             </div>
                           )}
 

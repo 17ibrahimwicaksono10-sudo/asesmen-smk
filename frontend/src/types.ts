@@ -20,6 +20,7 @@ export interface School {
   id: string;
   name: string;
   code: string;
+  npsn?: string;
   address: string;
   totalClasses: number;
   totalTeachers: number;
@@ -56,11 +57,14 @@ export type QuestionCategory = 'teknis_kimia' | 'employability';
 export type QuestionType =
   | 'multiple_choice'
   | 'complex_mcq'
+  | 'pilihan_ganda_kompleks'
+  | 'complex_multiple_choice'
   | 'matching'
   | 'short_answer'
   | 'essay'
   | 'essay_subquestions'
-  | 'scenario_assessment';
+  | 'scenario_assessment'
+  | 'analisis_kasus';
 
 export interface SubQuestion {
   id: string;
@@ -119,6 +123,11 @@ export interface QuestionItem {
   subQuestions?: SubQuestion[];
   points?: number;
   maxScore?: number;
+  dataTables?: any[];
+  instructions?: string;
+  contextText?: string;
+  requiresMultimodal?: boolean;
+  allowedEvidenceTypes?: string[];
 }
 
 export interface QuestionPackage {
@@ -262,6 +271,7 @@ export interface StudentAnswer {
   shortAnswerText?: string;
   shortAnswerCalculation?: string;
   essayAnswer?: string;
+  audioTranscript?: string;
   subQuestionAnswers?: Record<string, string>;
   multimodalEvidences?: MultimodalEvidence[];
   aiRubricScoring?: AIRubricScoreResult;

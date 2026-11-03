@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Exam, QuestionPackage, QuestionItem, StudentAnswer, ExamSubmission, MultimodalEvidence } from '../../types';
 import { calculateAssessmentScore, evaluateEssaySemantic, REVISED_QUESTIONS_24 } from '../../data/revisedQuestions';
 import { calculateEmployabilityScore, NON_TEST_QUESTIONS_18 } from '../../data/nonTestInstrument';
-import { Clock, CheckCircle2, AlertTriangle, ArrowLeft, ArrowRight, Send, Sparkles, ShieldAlert, BookOpen, Calculator, CheckSquare, Layers, Award, Info, Mic, RefreshCw } from 'lucide-react';
+import { Clock, CheckCircle2, AlertTriangle, AlertCircle, ArrowLeft, ArrowRight, Send, Sparkles, ShieldAlert, BookOpen, Calculator, CheckSquare, Layers, Award, Info, Mic, RefreshCw } from 'lucide-react';
 import { MultimodalUploader } from '../common/MultimodalUploader';
 
 interface ExamRunnerProps {
@@ -128,6 +128,35 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
     return () => clearTimeout(syncTimer);
   }, [answersState, currentQuestionIndex, exam.id, studentId, studentNis]);
+
+  // Muat draft dari server jika state lokal kosong (pemulihan crash/pindah perangkat)
+  useEffect(() => {
+    let isMounted = true;
+    const fetchServerDraft = async () => {
+      try {
+        const res = await fetch(`/api/exams/${exam.id}/draft`);
+        if (res.ok) {
+          const data = await res.json();
+          const draftAnswers = data.draft?.answers || data.draft?.draftData;
+          if (isMounted && draftAnswers && typeof draftAnswers === 'object' && Object.keys(draftAnswers).length > 0) {
+            setAnswersState(prev => {
+              if (Object.keys(prev).length === 0) {
+                return draftAnswers;
+              }
+              return prev;
+            });
+            if (typeof data.draft?.currentQuestionIndex === 'number' && data.draft.currentQuestionIndex > 0) {
+              setCurrentQuestionIndex(data.draft.currentQuestionIndex);
+            }
+          }
+        }
+      } catch (err) {}
+    };
+    if (Object.keys(answersState).length === 0) {
+      fetchServerDraft();
+    }
+    return () => { isMounted = false; };
+  }, [exam.id]);
 
   // Simpan sisa waktu setiap 5 detik agar akurat
   useEffect(() => {
@@ -484,7 +513,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
             earnedScore = (studentPick === correctPick || (studentPick.slice(0, 1) && studentPick.slice(0, 1) === correctPick.slice(0, 1))) ? 1 : 0;
           }
         }
-      } else if (q.type === 'complex_mcq') {
+      } else if (q.type === 'complex_mcq' || q.type === 'pilihan_ganda_kompleks' || q.type === 'complex_multiple_choice') {
         if (Array.isArray(qAns.selectedOptions)) {
           const studentLetters = qAns.selectedOptions.map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
           const correctLetters = (q.correctAnswers || []).map((opt: any) => (opt ? String(opt) : '').trim().slice(0, 1).toUpperCase());
@@ -829,7 +858,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
 
             <span className="text-xs text-amber-400 font-mono font-bold shrink-0">
               {currentQuestion.type === 'multiple_choice' && 'Pilihan Ganda'}
-              {currentQuestion.type === 'complex_mcq' && 'Pilihan Ganda Kompleks'}
+              {(currentQuestion.type === 'complex_mcq' || currentQuestion.type === 'pilihan_ganda_kompleks' || currentQuestion.type === 'complex_multiple_choice') && 'Pilihan Ganda Kompleks'}
               {currentQuestion.type === 'matching' && 'Menjodohkan'}
               {currentQuestion.type === 'short_answer' && 'Isian Singkat Berhitung'}
               {currentQuestion.type === 'essay' && 'Uraian Terbatas'}
@@ -915,7 +944,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           )}
 
           {/* 2. Complex MCQ (Google Form Checkbox Style - Pilihan Ganda Kompleks) */}
-          {currentQuestion.type === 'complex_mcq' && (() => {
+          {(currentQuestion.type === 'complex_mcq' || currentQuestion.type === 'pilihan_ganda_kompleks' || currentQuestion.type === 'complex_multiple_choice') && (() => {
             const complexOptions = (currentQuestion.options && currentQuestion.options.length > 0)
               ? currentQuestion.options
               : (activeQuestions.find(q => q.id === currentQuestion.id)?.options || []);

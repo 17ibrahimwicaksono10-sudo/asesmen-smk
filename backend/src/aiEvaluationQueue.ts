@@ -283,13 +283,23 @@ class AIEvaluationQueueManager {
         if (audioEv) {
           const audioData = audioEv.fileData || audioEv.storagePath || audioEv.storageUrl;
           const mime = audioEv.mimeType || 'audio/webm';
-          evalResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, audioData || '', mime);
+          const existingTranscript = (audioEv.extractedText && !audioEv.extractedText.startsWith('['))
+            ? audioEv.extractedText
+            : ((qAns.audioTranscript && !qAns.audioTranscript.startsWith('[')) ? qAns.audioTranscript : undefined);
+
+          evalResult = await evaluateAudioWithGeminiSTTAndDeepSeek(context, audioData || '', mime, existingTranscript);
           if (evalResult.transcription_or_extraction && (!audioEv.extractedText || audioEv.extractedText.startsWith('['))) {
             audioEv.extractedText = evalResult.transcription_or_extraction;
             audioEv.extractionStatus = 'completed';
           }
+          if (evalResult.transcription_or_extraction) {
+            qAns.audioTranscript = evalResult.transcription_or_extraction;
+            if (!qAns.essayAnswer) {
+              qAns.essayAnswer = evalResult.transcription_or_extraction;
+            }
+          }
         }
-        // 2. JALUR FOTO TULISAN TANGAN: Gemini Vision Multimodal Murni
+        // 2. JALUR FOTO TULISAN TANGAN: Gemini Vision Multimodal Murni (Penilaian Langsung)
         else if (imageEv) {
           const imgData = imageEv.fileData || imageEv.storagePath || imageEv.storageUrl;
           const mime = imageEv.mimeType || 'image/jpeg';
@@ -297,6 +307,9 @@ class AIEvaluationQueueManager {
           if (evalResult.transcription_or_extraction && (!imageEv.extractedText || imageEv.extractedText.startsWith('['))) {
             imageEv.extractedText = evalResult.transcription_or_extraction;
             imageEv.extractionStatus = 'completed';
+          }
+          if (evalResult.transcription_or_extraction && !qAns.essayAnswer) {
+            qAns.essayAnswer = evalResult.transcription_or_extraction;
           }
         }
         // 3. JALUR JAWABAN KETIKAN SISWA: DeepSeek API Murni
